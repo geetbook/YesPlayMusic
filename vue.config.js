@@ -7,6 +7,7 @@ function resolve(dir) {
 module.exports = {
   // 生产环境打包不输出 map
   productionSourceMap: false,
+  lintOnSave: false,
   devServer: {
     disableHostCheck: true,
     port: process.env.DEV_SERVER_PORT || 8080,
