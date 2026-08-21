@@ -46,10 +46,10 @@ module.exports = async (req, res) => {
 
 // ============ 酷狗音乐 ============
 async function tryKugou(keyword, ua) {
-  // 1. 搜索歌曲
+  // 1. 搜索歌曲（取多个结果逐一尝试，付费歌曲会跳过）
   const searchUrl = `https://mobiles.kugou.com/api/v3/search/song?keyword=${encodeURIComponent(
     keyword
-  )}&pagesize=1&page=1`;
+  )}&pagesize=5&page=1`;
   const searchResp = await fetch(searchUrl, { headers: { 'User-Agent': ua } });
   const searchData = await searchResp.json();
 
@@ -62,40 +62,51 @@ async function tryKugou(keyword, ua) {
     return null;
   }
 
-  const song = searchData.data.info[0];
-  const hash = song.hash;
-  const albumAudioId = song.album_audio_id;
+  // 2. 遍历搜索结果，尝试获取可播放链接
+  for (const song of searchData.data.info) {
+    const hash = song.hash;
+    const albumAudioId = song.album_audio_id;
 
-  // 2. 获取播放链接 - 尝试多个接口
-  // 接口 A: mobiles.kugou.com
-  const playUrlA = `https://www.kugou.com/yy/index.php?r=play/getdata&hash=${hash}&album_audio_id=${albumAudioId}`;
-  const playRespA = await fetch(playUrlA, {
-    headers: {
-      'User-Agent': ua,
-      Referer: `https://www.kugou.com/song/hash/${hash}`,
-    },
-  });
-  const playDataA = await playRespA.json();
-  if (playDataA && playDataA.data && playDataA.data.play_url) {
-    return {
-      url: playDataA.data.play_url.replace(/^http:/, 'https:'),
-      source: 'kugou',
-      songName: song.songname,
-      singerName: song.singername,
-    };
-  }
+    // 接口 A: www.kugou.com play/getdata
+    try {
+      const playUrlA = `https://www.kugou.com/yy/index.php?r=play/getdata&hash=${hash}&album_audio_id=${albumAudioId}`;
+      const playRespA = await fetch(playUrlA, {
+        headers: {
+          'User-Agent': ua,
+          Referer: `https://www.kugou.com/song/hash/${hash}`,
+        },
+      });
+      const playDataA = await playRespA.json();
+      if (playDataA && playDataA.data && playDataA.data.play_url) {
+        return {
+          url: playDataA.data.play_url.replace(/^http:/, 'https:'),
+          source: 'kugou',
+          songName: song.songname,
+          singerName: song.singername,
+        };
+      }
+    } catch (e) {
+      // 忽略单条错误，继续尝试下一个
+    }
 
-  // 接口 B: m.kugou.com playInfo
-  const playUrlB = `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=${hash}`;
-  const playRespB = await fetch(playUrlB, { headers: { 'User-Agent': ua } });
-  const playDataB = await playRespB.json();
-  if (playDataB && playDataB.url) {
-    return {
-      url: playDataB.url.replace(/^http:/, 'https:'),
-      source: 'kugou',
-      songName: song.songname,
-      singerName: song.singername,
-    };
+    // 接口 B: m.kugou.com playInfo
+    try {
+      const playUrlB = `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=${hash}`;
+      const playRespB = await fetch(playUrlB, {
+        headers: { 'User-Agent': ua },
+      });
+      const playDataB = await playRespB.json();
+      if (playDataB && playDataB.url) {
+        return {
+          url: playDataB.url.replace(/^http:/, 'https:'),
+          source: 'kugou',
+          songName: song.songname,
+          singerName: song.singername,
+        };
+      }
+    } catch (e) {
+      // 忽略单条错误，继续尝试下一个
+    }
   }
 
   return null;
@@ -103,8 +114,8 @@ async function tryKugou(keyword, ua) {
 
 // ============ QQ 音乐 ============
 async function tryQQ(keyword, ua, songName, artist) {
-  // 1. 搜索歌曲
-  const searchUrl = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=1&w=${encodeURIComponent(
+  // 1. 搜索歌曲（取多个结果逐一尝试，付费歌曲 purl 为空会跳过）
+  const searchUrl = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=5&w=${encodeURIComponent(
     keyword
   )}&format=json`;
   const searchResp = await fetch(searchUrl, {
@@ -125,38 +136,43 @@ async function tryQQ(keyword, ua, songName, artist) {
     return null;
   }
 
-  const song = searchData.data.song.list[0];
-  const songmid = song.songmid;
   const guid = '10000';
-  const filename = `C400${songmid}.m4a`;
 
-  // 2. 获取播放链接 vkey
-  const vkeyUrl = `https://u.y.qq.com/cgi-bin/musicu.fcg?data=%7B%22req_0%22%3A%7B%22module%22%3A%22vkey.GetVkeyServer%22%2C%22method%22%3A%22CgiGetVkey%22%2C%22param%22%3A%7B%22guid%22%3A%22${guid}%22%2C%22songmid%22%3A%5B%22${songmid}%22%5D%2C%22songtype%22%3A%5B0%5D%2C%22uin%22%3A%220%22%2C%22loginflag%22%3A1%2C%22platform%22%3A%2220%22%7D%7D%7D`;
-  const vkeyResp = await fetch(vkeyUrl, {
-    headers: { 'User-Agent': ua, Referer: 'https://y.qq.com/' },
-  });
-  const vkeyData = await vkeyResp.json();
+  // 2. 遍历搜索结果，尝试获取可播放链接
+  for (const song of searchData.data.song.list) {
+    const songmid = song.songmid;
+    try {
+      // 获取播放链接 vkey
+      const vkeyUrl = `https://u.y.qq.com/cgi-bin/musicu.fcg?data=%7B%22req_0%22%3A%7B%22module%22%3A%22vkey.GetVkeyServer%22%2C%22method%22%3A%22CgiGetVkey%22%2C%22param%22%3A%7B%22guid%22%3A%22${guid}%22%2C%22songmid%22%3A%5B%22${songmid}%22%5D%2C%22songtype%22%3A%5B0%5D%2C%22uin%22%3A%220%22%2C%22loginflag%22%3A1%2C%22platform%22%3A%2220%22%7D%7D%7D`;
+      const vkeyResp = await fetch(vkeyUrl, {
+        headers: { 'User-Agent': ua, Referer: 'https://y.qq.com/' },
+      });
+      const vkeyData = await vkeyResp.json();
 
-  if (
-    vkeyData &&
-    vkeyData.req_0 &&
-    vkeyData.req_0.data &&
-    vkeyData.req_0.data.midurlinfo &&
-    vkeyData.req_0.data.midurlinfo[0] &&
-    vkeyData.req_0.data.midurlinfo[0].purl
-  ) {
-    const purl = vkeyData.req_0.data.midurlinfo[0].purl;
-    const sip =
-      (vkeyData.req_0.data.sip &&
-        vkeyData.req_0.data.sip[0] &&
-        vkeyData.req_0.data.sip[0].replace(/^http:/, 'https:')) ||
-      'https://dl.stream.qqmusic.qq.com/';
-    return {
-      url: `${sip}${purl}`,
-      source: 'qq',
-      songName: song.songname,
-      singerName: song.singer ? song.singer[0].name : '',
-    };
+      if (
+        vkeyData &&
+        vkeyData.req_0 &&
+        vkeyData.req_0.data &&
+        vkeyData.req_0.data.midurlinfo &&
+        vkeyData.req_0.data.midurlinfo[0] &&
+        vkeyData.req_0.data.midurlinfo[0].purl
+      ) {
+        const purl = vkeyData.req_0.data.midurlinfo[0].purl;
+        const sip =
+          (vkeyData.req_0.data.sip &&
+            vkeyData.req_0.data.sip[0] &&
+            vkeyData.req_0.data.sip[0].replace(/^http:/, 'https:')) ||
+          'https://dl.stream.qqmusic.qq.com/';
+        return {
+          url: `${sip}${purl}`,
+          source: 'qq',
+          songName: song.songname,
+          singerName: song.singer ? song.singer[0].name : '',
+        };
+      }
+    } catch (e) {
+      // 忽略单条错误，继续尝试下一个
+    }
   }
 
   return null;
@@ -164,10 +180,10 @@ async function tryQQ(keyword, ua, songName, artist) {
 
 // ============ 酷我音乐 ============
 async function tryKuwo(keyword, ua) {
-  // 1. 搜索歌曲
+  // 1. 搜索歌曲（取多个结果逐一尝试）
   const searchUrl = `https://www.kuwo.cn/api/www/search/searchMusicBykeyWord?key=${encodeURIComponent(
     keyword
-  )}&pn=1&rn=1&httpsStatus=1`;
+  )}&pn=1&rn=5&httpsStatus=1`;
   const searchResp = await fetch(searchUrl, {
     headers: {
       'User-Agent': ua,
@@ -187,28 +203,32 @@ async function tryKuwo(keyword, ua) {
     return null;
   }
 
-  const song = searchData.data.list[0];
-  const rid = song.rid;
+  // 2. 遍历搜索结果，尝试获取可播放链接
+  for (const song of searchData.data.list) {
+    const rid = song.rid;
+    try {
+      const playUrl = `https://www.kuwo.cn/api/v1/www/music/playUrl?mid=${rid}&type=music&br=320kflac&httpsStatus=1`;
+      const playResp = await fetch(playUrl, {
+        headers: {
+          'User-Agent': ua,
+          Referer: 'https://www.kuwo.cn/play_detail/' + rid,
+          csrf: 'abcdefgh',
+          Cookie: 'kw_token=abcdefgh',
+        },
+      });
+      const playData = await playResp.json();
 
-  // 2. 获取播放链接
-  const playUrl = `https://www.kuwo.cn/api/v1/www/music/playUrl?mid=${rid}&type=music&br=320kflac&httpsStatus=1`;
-  const playResp = await fetch(playUrl, {
-    headers: {
-      'User-Agent': ua,
-      Referer: 'https://www.kuwo.cn/play_detail/' + rid,
-      csrf: 'abcdefgh',
-      Cookie: 'kw_token=abcdefgh',
-    },
-  });
-  const playData = await playResp.json();
-
-  if (playData && playData.data && playData.data.url) {
-    return {
-      url: playData.data.url.replace(/^http:/, 'https:'),
-      source: 'kuwo',
-      songName: song.name,
-      singerName: song.artist,
-    };
+      if (playData && playData.data && playData.data.url) {
+        return {
+          url: playData.data.url.replace(/^http:/, 'https:'),
+          source: 'kuwo',
+          songName: song.name,
+          singerName: song.artist,
+        };
+      }
+    } catch (e) {
+      // 忽略单条错误，继续尝试下一个
+    }
   }
 
   return null;
