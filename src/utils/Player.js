@@ -408,7 +408,7 @@ export default class {
         return source;
       });
     } else {
-      // 未登录：先尝试 song/url API 获取可播放链接，无效则 fallback 到外链
+      // 未登录：尝试 song/url API 获取可播放链接，无效返回 null 让 unblock 接管
       return getMP3(track.id)
         .then(result => {
           if (
@@ -418,22 +418,44 @@ export default class {
           ) {
             return result.data[0].url.replace(/^http:/, 'https:');
           }
-          // song/url 无有效链接，fallback 到外链接口
-          return `https://music.163.com/song/media/outer/url?id=${track.id}`;
+          return null;
         })
         .catch(() => {
-          return `https://music.163.com/song/media/outer/url?id=${track.id}`;
+          return null;
         });
     }
   }
   async _getAudioSourceFromUnblockMusic(track) {
     console.debug(`[debug][Player.js] _getAudioSourceFromUnblockMusic`);
 
-    if (
-      process.env.IS_ELECTRON !== true ||
-      store.state.settings.enableUnblockNeteaseMusic === false
-    ) {
+    if (store.state.settings.enableUnblockNeteaseMusic === false) {
       return null;
+    }
+
+    // Web 版：调用 /api/unblock 解灰 API 从酷狗音源获取
+    if (process.env.IS_ELECTRON !== true) {
+      try {
+        const artistName = (track.ar || track.artists || [])
+          .map(a => a.name)
+          .join(' ');
+        const params = new URLSearchParams({
+          id: track.id,
+          name: track.name,
+          artist: artistName,
+        });
+        const resp = await fetch(`/api/unblock?${params.toString()}`);
+        const data = await resp.json();
+        if (data && data.url) {
+          if (store.state.settings.automaticallyCacheSongs) {
+            cacheTrackSource(track, data.url, 128000, `unm:${data.source}`);
+          }
+          return data.url;
+        }
+        return null;
+      } catch (err) {
+        console.error('[unblock] failed:', err);
+        return null;
+      }
     }
 
     /**
@@ -501,6 +523,10 @@ export default class {
       })
       .then(source => {
         return source ?? this._getAudioSourceFromUnblockMusic(track);
+      })
+      .then(source => {
+        // 最后 fallback：网易云外链接口
+        return source ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
       });
   }
   _replaceCurrentTrack(
