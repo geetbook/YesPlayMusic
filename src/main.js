@@ -28,13 +28,41 @@ console.log(
   'background:unset;color:unset;'
 );
 
-Vue.use(
-  VueGtag,
-  {
-    config: { id: 'G-KMJJCFZDKF' },
-  },
-  router
-);
+// Google Analytics（vue-gtag）只在能访问 gtag 域名时异步注册
+// 否则在国内手机网络会阻塞首屏加载（gtag 域名无法访问导致超时）
+if (typeof window !== 'undefined') {
+  window.addEventListener('load', function () {
+    try {
+      // 先做一次连通性探测：加载 gtag.js 的小资源，超时则放弃注册
+      var probe = new Image();
+      var timedOut = false;
+      var timer = setTimeout(function () {
+        timedOut = true;
+        probe.onerror = probe.onload = null;
+      }, 2000);
+      probe.onload = function () {
+        clearTimeout(timer);
+        if (!timedOut) {
+          Vue.use(
+            VueGtag,
+            {
+              config: { id: 'G-KMJJCFZDKF' },
+              disableScriptLoad: false,
+            },
+            router
+          );
+        }
+      };
+      probe.onerror = function () {
+        clearTimeout(timer);
+        // 无法访问 gtag，放弃注册（国内手机网络常见情况）
+      };
+      probe.src = 'https://www.googletagmanager.com/gtag/js?id=G-KMJJCFZDKF';
+    } catch (e) {
+      // 忽略所有 GA 初始化错误，不影响主应用运行
+    }
+  });
+}
 Vue.config.productionTip = false;
 
 NProgress.configure({ showSpinner: false, trickleSpeed: 100 });
