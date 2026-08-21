@@ -408,9 +408,22 @@ export default class {
         return source;
       });
     } else {
-      return new Promise(resolve => {
-        resolve(`https://music.163.com/song/media/outer/url?id=${track.id}`);
-      });
+      // 未登录：先尝试 song/url API 获取可播放链接，无效则 fallback 到外链
+      return getMP3(track.id)
+        .then(result => {
+          if (
+            result.data[0] &&
+            result.data[0].url &&
+            result.data[0].freeTrialInfo === null
+          ) {
+            return result.data[0].url.replace(/^http:/, 'https:');
+          }
+          // song/url 无有效链接，fallback 到外链接口
+          return `https://music.163.com/song/media/outer/url?id=${track.id}`;
+        })
+        .catch(() => {
+          return `https://music.163.com/song/media/outer/url?id=${track.id}`;
+        });
     }
   }
   async _getAudioSourceFromUnblockMusic(track) {
