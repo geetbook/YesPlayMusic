@@ -1,3 +1,4 @@
+
 <template>
   <div
     class="track"
@@ -6,23 +7,24 @@
     :title="showUnavailableSongInGreyStyle ? track.reason : ''"
     @mouseover="hover = true"
     @mouseleave="hover = false"
+    @click="playTrack"
   >
     <img
       v-if="!isAlbum"
       :src="imgUrl"
       loading="lazy"
       :class="{ hover: focus }"
-      @click="goToAlbum"
+      @click.stop="goToAlbum"
     />
-    <div v-if="showOrderNumber" class="no">
-      <button v-show="focus && playable && !isPlaying" @click="playTrack">
+    <div v-if="showOrderNumber" class="no" @click.stop>
+      <button v-show="focus && playable && !isPlaying" @click.stop="playTrack">
         <svg-icon
           icon-class="play"
           style="height: 14px; width: 14px"
         ></svg-icon>
       </button>
       <span v-show="(!focus || !playable) && !isPlaying">{{ trackNo }}</span>
-      <button v-show="isPlaying">
+      <button v-show="isPlaying" @click.stop>
         <svg-icon
           icon-class="volume"
           style="height: 16px; width: 16px"
@@ -48,7 +50,7 @@
             ><ExplicitSymbol
           /></span>
         </div>
-        <div v-if="!isAlbum" class="artist">
+        <div v-if="!isAlbum" class="artist" @click.stop>
           <span
             v-if="(track.mark & 1048576) === 1048576"
             class="explicit-symbol before-artist"
@@ -60,15 +62,15 @@
       <div></div>
     </div>
 
-    <div v-if="showAlbumName" class="album">
+    <div v-if="showAlbumName" class="album" @click.stop>
       <router-link v-if="album && album.id" :to="`/album/${album.id}`">{{
         album.name
       }}</router-link>
       <div></div>
     </div>
 
-    <div v-if="showLikeButton" class="actions">
-      <button @click="likeThisSong">
+    <div v-if="showLikeButton" class="actions" @click.stop>
+      <button @click.stop="likeThisSong">
         <svg-icon
           icon-class="heart"
           :style="{
@@ -214,6 +216,7 @@ export default {
       this.$router.push({ path: '/album/' + this.track.al.id });
     },
     playTrack() {
+      if (!this.playable && this.showUnavailableSongInGreyStyle) return;
       this.$parent.playThisList(this.track.id);
     },
     likeThisSong() {
@@ -251,6 +254,9 @@ button {
   padding: 8px;
   border-radius: 12px;
   user-select: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0.06);
 
   .no {
     display: flex;
@@ -394,6 +400,7 @@ button {
   &:hover {
     background: none;
   }
+  cursor: default;
 }
 
 .track.tracklist {
