@@ -1,11 +1,26 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="referrer" content="no-referrer" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#335eea" />
+  <meta name="description" content="YesPlayMusic - 特斯拉车载音乐播放器" />
+  <!-- PWA manifest for Tesla car installation -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <!-- iOS / Tesla specific -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="YesPlayMusic" />
+  <link rel="apple-touch-icon" href="/img/icons/apple-touch-icon-180x180.png" />
+  <!-- Prevent auto-zoom on input focus (Tesla / mobile) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <!-- Prevent phone number detection (Tesla) -->
+  <meta name="format-detection" content="telephone=no" />
+  <!-- Audio preload hints for Tesla car media controls -->
+  <meta http-equiv="Audio-Load" content="auto" />
   <link rel="icon" href="<%= BASE_URL %>favicon.ico" />
   <title>
     <%= htmlWebpackPlugin.options.title %>

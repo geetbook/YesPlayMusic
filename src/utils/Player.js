@@ -340,6 +340,10 @@ export default class {
         this._nextTrackCallback();
       },
     });
+    // Sync source to Tesla car's visible audio element
+    if (typeof window !== 'undefined' && window.__playerSyncTesla) {
+      window.__playerSyncTesla();
+    }
     this._howler.on('loaderror', (_, errCode) => {
       // https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
       // code 3: MEDIA_ERR_DECODE
@@ -636,6 +640,22 @@ export default class {
         this.seek(this.seek() + (event.seekOffset || 10));
         this._updateMediaSessionPositionState();
       });
+      // Enhanced actions for Tesla car and modern browsers
+      if ('setActionHandler' in navigator.mediaSession) {
+        try {
+          navigator.mediaSession.setActionHandler('playnext', () => {
+            this._playNextTrack(this.isPersonalFM);
+          });
+        } catch (e) {}
+        try {
+          navigator.mediaSession.setActionHandler('previoustrack', () => {
+            this.playPrevTrack();
+          });
+        } catch (e) {}
+        try {
+          navigator.mediaSession.setActionHandler('addtoqueue', () => {});
+        } catch (e) {}
+      }
     }
   }
   _updateMediaSessionMetaData(track) {
@@ -667,6 +687,10 @@ export default class {
     navigator.mediaSession.metadata = new window.MediaMetadata(metadata);
     if (isCreateMpris) {
       this._updateMprisState(track, metadata);
+    }
+    // Sync metadata to Tesla car audio element
+    if (typeof window !== 'undefined' && window.__playerSetMetadataTesla) {
+      window.__playerSetMetadataTesla(track, track.al?.picUrl);
     }
   }
   // OSDLyrics 会检测 Mpris 状态并寻找对应歌词文件，所以要在更新 Mpris 状态之前保证歌词下载完成
@@ -854,6 +878,10 @@ export default class {
       this._setPlaying(false);
       setTitle(null);
       this._pauseDiscordPresence(this._currentTrack);
+      // Sync to Tesla car audio element
+      if (typeof window !== 'undefined' && window.__playerPauseTesla) {
+        window.__playerPauseTesla();
+      }
     });
   }
   play() {
@@ -872,6 +900,11 @@ export default class {
         setTitle(this._currentTrack);
       }
       this._playDiscordPresence(this._currentTrack, this.seek());
+      // Sync to Tesla car audio element
+      if (typeof window !== 'undefined' && window.__playerPlayTesla) {
+        window.__playerPlayTesla();
+        window.__playerSetMetadataTesla(this._currentTrack, this._currentTrack.al?.picUrl);
+      }
       if (store.state.lastfm.key !== undefined) {
         trackUpdateNowPlaying({
           artist: this.currentTrack.ar[0].name,
@@ -898,6 +931,10 @@ export default class {
       this._howler?.seek(time);
       if (this._playing)
         this._playDiscordPresence(this._currentTrack, this.seek(null, false));
+      // Sync to Tesla car audio element
+      if (typeof window !== 'undefined' && window.__playerSeekTesla) {
+        window.__playerSeekTesla(time);
+      }
     }
     return this._howler === null ? 0 : this._howler.seek();
   }

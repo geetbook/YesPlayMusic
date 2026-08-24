@@ -28,6 +28,28 @@ console.log(
   'background:unset;color:unset;'
 );
 
+// Register Service Worker for PWA (Tesla car needs this for background keepalive)
+if ('serviceWorker' in navigator && !process.env.IS_ELECTRON) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/service-worker.js')
+      .then((reg) => {
+        console.log('SW registered:', reg.scope);
+      })
+      .catch((err) => {
+        console.log('SW registration failed:', err);
+      });
+    // Periodic keepalive even when tab is hidden
+    setInterval(() => {
+      if (document.visibilityState === 'hidden') {
+        fetch('/api/unblock?keepalive=' + Date.now(), {
+          cache: 'no-store',
+        }).catch(() => {});
+      }
+    }, 15000);
+  });
+}
+
 // Google Analytics（vue-gtag）只在能访问 gtag 域名时异步注册
 // 否则在国内手机网络会阻塞首屏加载（gtag 域名无法访问导致超时）
 if (typeof window !== 'undefined') {

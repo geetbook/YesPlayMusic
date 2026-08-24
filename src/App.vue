@@ -21,6 +21,20 @@
     <transition v-if="enablePlayer" name="slide-up">
       <Lyrics v-show="showLyrics" />
     </transition>
+    <!-- Tesla car needs a visible audio element to enable native media controls -->
+    <audio
+      ref="teslaAudio"
+      id="tesla-audio"
+      preload="auto"
+      playsinline
+      webkit-playsinline
+      x5-playsinline
+      style="position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;"
+      @play="onTeslaAudioPlay"
+      @pause="onTeslaAudioPause"
+      @ended="onTeslaAudioEnded"
+      @timeupdate="onTeslaAudioTimeUpdate"
+    ></audio>
   </div>
 </template>
 
@@ -49,8 +63,14 @@ export default {
   },
   data() {
     return {
-      isElectron: process.env.IS_ELECTRON, // true || undefined
+      isElectron: process.env.IS_ELECTRON,
       userSelectNone: false,
+      teslaAudioEl: null,
+      _keepaliveTimer: null,
+      _lastPlayState: null,
+      _autoResumeOnVisible: false,
+      _resumeTrackId: null,
+      _resumeSeekTime: 0,
     };
   },
   computed: {
@@ -80,6 +100,11 @@ export default {
     if (this.isElectron) ipcRenderer(this);
     window.addEventListener('keydown', this.handleKeydown);
     this.fetchData();
+    this.$nextTick(() => {
+      this.initTeslaAudio();
+      this.initKeepalive();
+      this.initVisibilityHandler();
+    });
   },
   methods: {
     handleKeydown(e) {
@@ -104,6 +129,187 @@ export default {
     },
     handleScroll() {
       this.$refs.scrollbar.handleScroll();
+    },
+    initTeslaAudio() {
+      this.teslaAudioEl = this.$refs.teslaAudio;
+      if (!this.teslaAudioEl) return;
+      if (this.player && this.player._howler) {
+        this.syncTeslaAudioSource();
+      }
+      window.__playerSyncTesla = () => this.syncTeslaAudioSource();
+      window.__playerPlayTesla = () => this.playTeslaAudio();
+      window.__playerPauseTesla = () => this.pauseTeslaAudio();
+      window.__playerSeekTesla = (t) => this.seekTeslaAudio(t);
+      window.__playerSetMetadataTesla = (track, artwork) =>
+        this.setTeslaAudioMetadata(track, artwork);
+    },
+    syncTeslaAudioSource() {
+      if (!this.teslaAudioEl || !this.player) return;
+      const track = this.player.currentTrack;
+      if (!track || !this.player._howler) return;
+      const sound = this.player._howler._sounds[0];
+      if (sound && sound._src && sound._src !== this.teslaAudioEl.src) {
+        this.teslaAudioEl.src = sound._src;
+        if (!this.teslaAudioEl.paused) {
+          this.teslaAudioEl.pause();
+        }
+        this.teslaAudioEl.currentTime = 0;
+        this.setTeslaAudioMetadata(track, track.al?.picUrl);
+      }
+    },
+    playTeslaAudio() {
+      if (!this.teslaAudioEl) return;
+      if (this.teslaAudioEl.src) {
+        this.teslaAudioEl.play().catch(() => {});
+      }
+    },
+    pauseTeslaAudio() {
+      if (!this.teslaAudioEl) return;
+      this.teslaAudioEl.pause();
+    },
+    seekTeslaAudio(time) {
+      if (!this.teslaAudioEl) return;
+      this.teslaAudioEl.currentTime = time || 0;
+    },
+    setTeslaAudioMetadata(track, artwork) {
+      if (!this.teslaAudioEl || !track) return;
+      try {
+        this.teslaAudioEl.title = track.name || '';
+        this.teslaAudioEl.artist = track.ar ? track.ar.map((a) => a.name).join(',') : '';
+        this.teslaAudioEl.album = track.al ? track.al.name : '';
+        this.teslaAudioEl.cover = artwork || '';
+        if (artwork) {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => {
+            try {
+              if (navigator.mediaSession) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                  title: track.name,
+                  artist: track.ar ? track.ar.map((a) => a.name).join(',') : '',
+                  album: track.al ? track.al.name : '',
+                  artwork: [
+                    { src: artwork + '?param=512y512', sizes: '512x512', type: 'image/jpeg' },
+                  ],
+                });
+              }
+            } catch (e) {}
+          };
+          img.src = artwork;
+        } else if (navigator.mediaSession) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: track.name,
+            artist: track.ar ? track.ar.map((a) => a.name).join(',') : '',
+            album: track.al ? track.al.name : '',
+          });
+        }
+      } catch (e) {}
+    },
+    onTeslaAudioPlay() {
+      if (this.player && !this.player._playing) {
+        this.player.play();
+      }
+    },
+    onTeslaAudioPause() {
+      if (this.player && this.player._playing) {
+        this.player.pause();
+      }
+    },
+    onTeslaAudioEnded() {
+      if (this.player) {
+        this.player._nextTrackCallback();
+      }
+    },
+    onTeslaAudioTimeUpdate() {
+      if (this.player && this.teslaAudioEl) {
+        if (Math.abs(this.player.seek() - this.teslaAudioEl.currentTime) > 2) {
+          this.player.seek(this.teslaAudioEl.currentTime);
+        }
+      }
+    },
+    initKeepalive() {
+      if (this._keepaliveTimer) clearInterval(this._keepaliveTimer);
+      this._keepaliveTimer = setInterval(() => {
+        if (this._autoResumeOnVisible) {
+          this.doKeepaliveFetch();
+        }
+      }, 20000);
+      this.doKeepaliveFetch();
+      window.addEventListener('online', () => this.doKeepaliveFetch());
+      this._keepaliveWorker = null;
+      if (typeof Worker !== 'undefined') {
+        try {
+          this._keepaliveWorker = new Worker(
+            URL.createObjectURL(
+              new Blob([
+                `setInterval(function(){self.postMessage('tick');},15000);`,
+              ], { type: 'application/javascript' })
+            )
+          );
+          this._keepaliveWorker.onmessage = () => this.doKeepaliveFetch();
+        } catch (e) {}
+      }
+    },
+    doKeepaliveFetch() {
+      const url = '/api/unblock?keepalive=' + Date.now();
+      fetch(url, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      }).catch(() => {});
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'KEEPALIVE' });
+      }
+    },
+    initVisibilityHandler() {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          if (this.player && this.player._playing) {
+            this._autoResumeOnVisible = true;
+            this._lastPlayState = true;
+            this._resumeTrackId = this.player.currentTrackID;
+            this._resumeSeekTime = this.player.seek();
+          } else {
+            this._lastPlayState = false;
+          }
+          if (this._keepaliveTimer) {
+            this._keepaliveInterval = setInterval(() => {
+              fetch('/api/unblock?keepalive=' + Date.now(), {
+                cache: 'no-store',
+              }).catch(() => {});
+            }, 8000);
+          }
+        } else if (document.visibilityState === 'visible') {
+          if (this._keepaliveInterval) {
+            clearInterval(this._keepaliveInterval);
+            this._keepaliveInterval = null;
+          }
+          if (this._autoResumeOnVisible && this._resumeTrackId) {
+            this.player._replaceCurrentTrack(this._resumeTrackId).then(() => {
+              this.player.seek(this._resumeSeekTime);
+              this.player.play();
+            });
+            this._autoResumeOnVisible = false;
+          }
+        }
+      });
+      window.addEventListener('pageshow', (e) => {
+        if (e.persisted && this._autoResumeOnVisible && this._resumeTrackId) {
+          this.player._replaceCurrentTrack(this._resumeTrackId).then(() => {
+            this.player.seek(this._resumeSeekTime);
+            this.player.play();
+          });
+          this._autoResumeOnVisible = false;
+        }
+      });
+      window.addEventListener('pagehide', () => {
+        if (this.player && this.player._playing) {
+          this._autoResumeOnVisible = true;
+          this._resumeTrackId = this.player.currentTrackID;
+          this._resumeSeekTime = this.player.seek();
+          this.player.pause();
+        }
+      });
     },
   },
 };
