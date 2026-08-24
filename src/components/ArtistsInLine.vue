@@ -2,7 +2,7 @@
   <span class="artist-in-line">
     {{ computedPrefix }}
     <span v-for="(ar, index) in filteredArtists" :key="index">
-      <router-link v-if="ar.id !== 0" :to="`/artist/${ar.id}`">{{
+      <router-link v-if="ar.id !== 0" :to="`/artist/${ar.id}`" @click.stop>{{
         ar.name
       }}</router-link>
       <span v-else>{{ ar.name }}</span>
