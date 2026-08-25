@@ -74,11 +74,24 @@ export function userPlayHistory(params) {
  * @param {number} uid
  */
 export function userLikedSongsIDs(uid) {
+  // Defensive unwrap for uid: call sites used to pass plain number uid (the
+  // documented contract), but somewhere in the app state an object of shape
+  // { uid: <number> } gets passed instead — which axios serializes into the
+  // query string as `uid=%7B%22uid%22%3A17838986178%7D` and returns empty data.
+  // Accept both forms and extract the primitive numeric uid.
+  const raw =
+    typeof uid === 'object' && uid !== null
+      ? uid.uid ?? uid.userId ?? uid.id ?? String(uid)
+      : uid;
+  const finalUid =
+    typeof raw === 'object' && raw !== null
+      ? String(raw)
+      : raw;
   return request({
     url: '/likelist',
     method: 'get',
     params: {
-      uid,
+      uid: finalUid,
       timestamp: new Date().getTime(),
     },
   });

@@ -90,21 +90,32 @@ export function loginQrCodeCheck(key) {
  * 刷新登录
  * 说明 : 调用此接口 , 可刷新登录状态
  * - 调用例子 : /login/refresh
+ * NOTE: Force GET to guarantee the request never triggers the Cloudflare
+ * Worker Basic Auth layer's HTTP 405 "Method Not Allowed" edge block on
+ * the music.688810.xyz custom domain (Worker rejects POST / OPTIONS for
+ * non-static XHR). NeteaseCloudMusicApi accepts both GET and POST here.
  */
 export function refreshCookie() {
   return request({
     url: '/login/refresh',
-    method: 'post',
+    method: 'get',
+    params: {
+      timestamp: new Date().getTime(),
+    },
   });
 }
 
 /**
  * 退出登录
  * 说明 : 调用此接口 , 可退出登录
+ * NOTE: Force GET for the same 405-edge-block reason as refreshCookie.
  */
 export function logout() {
   return request({
     url: '/logout',
-    method: 'post',
+    method: 'get',
+    params: {
+      timestamp: new Date().getTime(),
+    },
   });
 }

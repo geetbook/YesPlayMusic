@@ -31,21 +31,14 @@ if (process.env.IS_ELECTRON) {
   //      use-case (GET/POST are allowed for browser XHR/fetch).
   //   4. Vercel Rewrite on the frontend project still routes `/api/*` through
   //      as a fallback (keeps unblock API endpoints and legacy URLs working).
+  //
+  // NOTE: We always force this direct upstream for web builds now, regardless
+  // of what VUE_APP_NETEASE_API_URL was set to during the Vercel build. Past
+  // builds had env='/api' or env=undefined and produced mixed traffic where
+  // some requests leaked through the Worker edge (e.g. POST /login/refresh
+  // -> 405). Going direct for 100% of Netease API calls guarantees no 405.
   const DIRECT_UPSTREAM = 'https://api-enhanced-sooty-six.vercel.app';
-  const envBase = process.env.VUE_APP_NETEASE_API_URL || '';
-  if (
-    typeof envBase === 'string' &&
-    envBase.length &&
-    envBase !== '/api' &&
-    envBase !== '/api/'
-  ) {
-    // An explicit host-based API URL was set via env — honor it.
-    baseURL = envBase;
-  } else {
-    // Default (either unset OR the relative "/api" placeholder) → go direct
-    // to the upstream API host to avoid Cloudflare Worker method issues.
-    baseURL = DIRECT_UPSTREAM;
-  }
+  baseURL = DIRECT_UPSTREAM;
 }
 
 const service = axios.create({
