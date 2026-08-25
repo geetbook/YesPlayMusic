@@ -11,7 +11,41 @@ if (process.env.IS_ELECTRON) {
     baseURL = process.env.VUE_APP_ELECTRON_API_URL_DEV;
   }
 } else {
-  baseURL = process.env.VUE_APP_NETEASE_API_URL;
+  // Production web build: bypass the Cloudflare Worker Basic Auth layer that
+  // sits in front of our custom domain (music.688810.xyz). The Worker correctly
+  // forwards GET requests for static assets and read-only API queries (detail,
+  // lyric, song/url) but has been observed to return HTTP 405 "Method Not
+  // Allowed" for POST /playlist/subscribe and similar mutation requests, even
+  // after we switched those endpoints to GET. By routing API calls directly
+  // to the upstream NeteaseCloudMusicApi deployment we skip the extra proxy
+  // layer entirely and eliminate the entire class of 405/403/CORS edge
+  // problems caused by the Worker.
+  //
+  // This is safe because:
+  //   1. The upstream API is a public Binaryify-style deployment (no auth on
+  //      the API itself — auth lives in the MUSIC_U cookie / query-string
+  //      credential that we explicitly attach below).
+  //   2. We send credentials via query string (`cookie: MUSIC_U=…`) instead
+  //      of the Cookie header, so cross-origin cookies are never required.
+  //   3. The upstream already responds with permissive CORS headers for our
+  //      use-case (GET/POST are allowed for browser XHR/fetch).
+  //   4. Vercel Rewrite on the frontend project still routes `/api/*` through
+  //      as a fallback (keeps unblock API endpoints and legacy URLs working).
+  const DIRECT_UPSTREAM = 'https://api-enhanced-sooty-six.vercel.app';
+  const envBase = process.env.VUE_APP_NETEASE_API_URL || '';
+  if (
+    typeof envBase === 'string' &&
+    envBase.length &&
+    envBase !== '/api' &&
+    envBase !== '/api/'
+  ) {
+    // An explicit host-based API URL was set via env — honor it.
+    baseURL = envBase;
+  } else {
+    // Default (either unset OR the relative "/api" placeholder) → go direct
+    // to the upstream API host to avoid Cloudflare Worker method issues.
+    baseURL = DIRECT_UPSTREAM;
+  }
 }
 
 const service = axios.create({
