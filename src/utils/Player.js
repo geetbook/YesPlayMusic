@@ -244,6 +244,79 @@ export default class {
     if (isCreateTray) {
       ipcRenderer?.send('updateTrayPlayState', this._playing);
     }
+    this._setMediaSessionPlaybackState(isPlaying ? 'playing' : 'paused');
+  }
+  _setMediaSessionPlaybackState(state) {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      if (typeof navigator.mediaSession.playbackState !== 'undefined') {
+        navigator.mediaSession.playbackState = state;
+      }
+    } catch (e) {}
+    // When the playback state changes, refresh the previous/next action
+    // handlers — Tesla only enables the native buttons after seeing a valid
+    // queue-capable action handler registered during an active/paused session.
+    this._refreshMediaSessionTrackActions();
+  }
+  _hasNextTrack() {
+    if (this._isPersonalFM) return true; // personal FM always has next
+    if (this._playNextList && this._playNextList.length > 0) return true;
+    if (this.repeatMode === 'on' || this.repeatMode === 'one') return true;
+    const total = this._list && this._list.length;
+    if (!total) return false;
+    if (this._shuffle) {
+      return this._shuffledCurrent + 1 < this._shuffledList.length;
+    }
+    return this._current + 1 < total;
+  }
+  _hasPrevTrack() {
+    if (this._isPersonalFM) return false; // personal FM no go back
+    if (this.repeatMode === 'on' || this.repeatMode === 'one') return true;
+    const total = this._list && this._list.length;
+    if (!total) return false;
+    if (this._shuffle) {
+      return this._shuffledCurrent > 0;
+    }
+    return this._current > 0;
+  }
+  _refreshMediaSessionTrackActions() {
+    if (!('mediaSession' in navigator) || !('setActionHandler' in navigator.mediaSession)) {
+      return;
+    }
+    const hasPrev = this._hasPrevTrack();
+    const hasNext = this._hasNextTrack();
+    // Re-register previoustrack so Tesla re-evaluates enabled state
+    try {
+      navigator.mediaSession.setActionHandler('previoustrack', hasPrev ? () => {
+        this.playPrevTrack();
+      } : null);
+    } catch (e) {}
+    try {
+      navigator.mediaSession.setActionHandler('nexttrack', hasNext ? () => {
+        this._playNextTrack(this.isPersonalFM);
+      } : null);
+    } catch (e) {}
+    // Re-register duplicates under alternative action names used by some
+    // Tesla / Chromium builds to surface next/prev transport controls.
+    try {
+      navigator.mediaSession.setActionHandler('playnext', hasNext ? () => {
+        this._playNextTrack(this.isPersonalFM);
+      } : null);
+    } catch (e) {}
+    try {
+      navigator.mediaSession.setActionHandler('playprevious', hasPrev ? () => {
+        this.playPrevTrack();
+      } : null);
+    } catch (e) {}
+    // Keep seeking/stop handlers alive for the new session too
+    try {
+      navigator.mediaSession.setActionHandler('stop', () => {
+        this.pause();
+        if (typeof window !== 'undefined') {
+          window.__teslaStopTs = Date.now();
+        }
+      });
+    } catch (e) {}
   }
   _setIntervals() {
     // 同步播放进度
@@ -749,6 +822,10 @@ export default class {
     };
 
     navigator.mediaSession.metadata = new window.MediaMetadata(metadata);
+    // After updating metadata, re-evaluate the next/prev transport enabled
+    // state so Tesla's native media bar paints the buttons in an active state
+    // (instead of greyed out) when there is a queue.
+    this._refreshMediaSessionTrackActions();
     if (isCreateMpris) {
       this._updateMprisState(track, metadata);
     }

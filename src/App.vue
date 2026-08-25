@@ -22,6 +22,10 @@
       <Lyrics v-show="showLyrics" />
     </transition>
     <!-- Tesla car needs a visible audio element to enable native media controls -->
+    <!-- IMPORTANT: opacity:0 or display:none causes Tesla to ignore it, so -->
+    <!-- we keep size > 0 but clip it out of the viewport (left: -9999px).     -->
+    <!-- playsinline + webkit-playsinline ensures the element is considered a -->
+    <!-- "now playing session" even on WebKit builds that force fullscreen.    -->
     <audio
       ref="teslaAudio"
       id="tesla-audio"
@@ -29,11 +33,13 @@
       playsinline
       webkit-playsinline
       x5-playsinline
-      style="position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;"
+      muted
+      style="position:fixed;bottom:0;left:-9999px;width:2px;height:2px;z-index:-1;pointer-events:none;object-position:0 0;"
       @play="onTeslaAudioPlay"
       @pause="onTeslaAudioPause"
       @ended="onTeslaAudioEnded"
       @timeupdate="onTeslaAudioTimeUpdate"
+      @loadedmetadata="onTeslaAudioLoadedMeta"
     ></audio>
   </div>
 </template>
@@ -257,6 +263,20 @@ export default {
     initTeslaAudio() {
       this.teslaAudioEl = this.$refs.teslaAudio;
       if (!this.teslaAudioEl) return;
+      // Expose refresh hook back to Player so loadedmetadata can re-trigger
+      // MediaSession track action registration from App.vue.
+      if (window) {
+        window.__playerRefreshMediaSessionTrackActions = () => {
+          if (this.player && typeof this.player._refreshMediaSessionTrackActions === 'function') {
+            this.player._refreshMediaSessionTrackActions();
+          }
+        };
+        window.addEventListener('tesla:refresh-actions', () => {
+          if (this.player && typeof this.player._refreshMediaSessionTrackActions === 'function') {
+            this.player._refreshMediaSessionTrackActions();
+          }
+        });
+      }
       if (this.player && this.player._howler) {
         this.syncTeslaAudioSource();
       }
@@ -273,27 +293,66 @@ export default {
       if (!track || !this.player._howler) return;
       const sound = this.player._howler._sounds[0];
       if (sound && sound._src && sound._src !== this.teslaAudioEl.src) {
+        // Stop the silent track first so Tesla re-evaluates "now playing"
+        try {
+          if (!this.teslaAudioEl.paused) {
+            this.teslaAudioEl.pause();
+          }
+        } catch (e) {}
+        this.teslaAudioEl.removeAttribute('src');
+        try { this.teslaAudioEl.load(); } catch (e) {}
         this.teslaAudioEl.src = sound._src;
-        if (!this.teslaAudioEl.paused) {
-          this.teslaAudioEl.pause();
-        }
+        try { this.teslaAudioEl.load(); } catch (e) {}
         this.teslaAudioEl.currentTime = 0;
         this.setTeslaAudioMetadata(track, track.al?.picUrl);
+        // Kick a tiny synthetic play/pause so the UA announces the session
+        // and enables transport controls, even on Tesla builds that require
+        // an explicit media element play() before lighting up the buttons.
+        try {
+          const p = this.teslaAudioEl.play();
+          if (p && typeof p.catch === 'function') {
+            p.catch(() => {}).finally(() => {
+              if (this.player && !this.player._playing) {
+                try { this.teslaAudioEl.pause(); } catch (e2) {}
+              }
+            });
+          }
+        } catch (e) {}
       }
     },
     playTeslaAudio() {
       if (!this.teslaAudioEl) return;
+      if (!this.teslaAudioEl.src && this.player && this.player._howler) {
+        const sound = this.player._howler._sounds[0];
+        if (sound && sound._src) {
+          this.teslaAudioEl.src = sound._src;
+          try { this.teslaAudioEl.load(); } catch (e) {}
+        }
+      }
       if (this.teslaAudioEl.src) {
-        this.teslaAudioEl.play().catch(() => {});
+        // Sync currentTime from actual Howler playback so the Tesla UI shows
+        // progress from the correct position instead of always jumping to 0.
+        try {
+          if (this.player) {
+            const t = this.player.seek();
+            if (typeof t === 'number' && !isNaN(t) && isFinite(t)) {
+              this.teslaAudioEl.currentTime = t;
+            }
+          }
+        } catch (e) {}
+        const p = this.teslaAudioEl.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
       }
     },
     pauseTeslaAudio() {
       if (!this.teslaAudioEl) return;
-      this.teslaAudioEl.pause();
+      try { this.teslaAudioEl.pause(); } catch (e) {}
     },
     seekTeslaAudio(time) {
       if (!this.teslaAudioEl) return;
-      this.teslaAudioEl.currentTime = time || 0;
+      try {
+        this.teslaAudioEl.currentTime = (time || 0) | 0;
+      } catch (e) {}
     },
     setTeslaAudioMetadata(track, artwork) {
       if (!this.teslaAudioEl || !track) return;
@@ -349,6 +408,33 @@ export default {
         if (Math.abs(this.player.seek() - this.teslaAudioEl.currentTime) > 2) {
           this.player.seek(this.teslaAudioEl.currentTime);
         }
+      }
+    },
+    onTeslaAudioLoadedMeta() {
+      // Once Tesla WebKit parses the media metadata, re-assert duration and
+      // nudge MediaSession so the OS-level transport controls (prev/next) see
+      // a valid session and stop drawing greyed-out buttons.
+      try {
+        if (navigator.mediaSession && typeof navigator.mediaSession.setPositionState === 'function') {
+          const dur = this.teslaAudioEl && isFinite(this.teslaAudioEl.duration) && this.teslaAudioEl.duration > 0
+            ? this.teslaAudioEl.duration
+            : (this.player ? (this.player.currentTrackDuration || 0) : 0);
+          const pos = this.player ? (this.player.seek() || 0) : 0;
+          if (dur > 0) {
+            navigator.mediaSession.setPositionState({
+              duration: dur,
+              playbackRate: 1.0,
+              position: Math.min(pos, dur - 0.001),
+            });
+          }
+        }
+      } catch (e) {}
+      // Ask Player to re-register next/prev handlers so Tesla refreshes their
+      // enabled state now that a real audio stream has been observed.
+      if (typeof window !== 'undefined' && window.__playerRefreshMediaSessionTrackActions) {
+        try { window.__playerRefreshMediaSessionTrackActions(); } catch (e) {}
+      } else if (typeof window !== 'undefined' && window.dispatchEvent) {
+        try { window.dispatchEvent(new CustomEvent('tesla:refresh-actions')); } catch (e) {}
       }
     },
     initKeepalive() {
