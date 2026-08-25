@@ -104,6 +104,7 @@ export default {
       this.initTeslaAudio();
       this.initKeepalive();
       this.initVisibilityHandler();
+      this.initTeslaSearchHandler();
     });
   },
   methods: {
@@ -113,6 +114,129 @@ export default {
         if (this.$route.name === 'mv') return false;
         e.preventDefault();
         this.player.playOrPause();
+      }
+    },
+    goToSearch() {
+      try {
+        const currentName = this.$route && this.$route.name;
+        if (currentName && currentName.indexOf('search') === 0) {
+          // already on a search page — try to focus the input via DOM
+          this.$nextTick(() => {
+            try {
+              const input = document.querySelector(
+                'input[type="search"], input[placeholder*="搜索"], input[placeholder*="Search"]'
+              );
+              if (input && typeof input.focus === 'function') {
+                input.focus();
+              }
+            } catch (e) {}
+          });
+          return;
+        }
+        this.$router.push('/search');
+      } catch (e) {
+        // fallback: direct location change so the SPA router catches it
+        if (window.location && window.location.hash) {
+          window.location.hash = '#/search';
+        }
+      }
+    },
+    initTeslaSearchHandler() {
+      // Expose a public hook that MediaSession actions and the Tesla audio
+      // element event listeners can invoke without circular dependencies.
+      window.__teslaGoToSearch = () => this.goToSearch();
+      // Listen for a custom event dispatched by Player.js search fallback
+      window.addEventListener('tesla:media-search', () => this.goToSearch());
+      // Tesla sometimes dispatches a synthetic keypress when the search icon
+      // is tapped. The common car-OS convention is F3 or Ctrl+F for search.
+      window.addEventListener('keydown', (e) => {
+        if (
+          e.key === 'F3' ||
+          e.code === 'F3' ||
+          (e.ctrlKey && (e.key === 'f' || e.key === 'F')) ||
+          (e.metaKey && (e.key === 'f' || e.key === 'F'))
+        ) {
+          e.preventDefault();
+          this.goToSearch();
+        }
+      });
+      // Tesla WebKit occasionally sends hashchange / url intent signals when
+      // the native media bar is asked to perform a "browse/search" action.
+      // Intercept those and redirect them to our own search route.
+      const interceptSearchIntent = () => {
+        const hash = window.location.hash || '';
+        const search = window.location.search || '';
+        const combined = (hash + search).toLowerCase();
+        const markers = [
+          'tesla-search',
+          'media-search',
+          'car-search',
+          'action=search',
+          'action=browse',
+          'intent=search',
+          'open=search',
+        ];
+        if (markers.some((m) => combined.indexOf(m) !== -1)) {
+          // strip synthetic markers and navigate to /search
+          if (window.history && typeof window.history.replaceState === 'function') {
+            const cleanUrl =
+              window.location.protocol +
+              '//' +
+              window.location.host +
+              window.location.pathname +
+              '#/search';
+            window.history.replaceState({}, '', cleanUrl);
+          }
+          if (this.$route && this.$route.path !== '/search') {
+            this.$router.replace('/search').catch(() => {});
+          }
+        }
+      };
+      window.addEventListener('hashchange', interceptSearchIntent);
+      interceptSearchIntent();
+      // Additionally, watch the tesla-audio element for anomalous events that
+      // Tesla fires when the native search icon is clicked: some builds trigger
+      // a fast pause+play, a zero-duration seek, or an `emptied` event with no
+      // src change. Detect those patterns and route to search.
+      let lastPauseTs = 0;
+      const audioEl = this.$refs.teslaAudio;
+      if (audioEl) {
+        audioEl.addEventListener('pause', () => {
+          lastPauseTs = Date.now();
+        });
+        audioEl.addEventListener('play', () => {
+          const dt = Date.now() - lastPauseTs;
+          if (dt > 0 && dt < 120 && window.__teslaStopTs) {
+            // pause-then-play faster than a human tap is a Tesla search hint
+            const stopDt = Date.now() - window.__teslaStopTs;
+            if (stopDt < 600) {
+              this.goToSearch();
+            }
+          }
+        });
+        audioEl.addEventListener('loadedmetadata', () => {
+          // no-op reserved for future Tesla-specific heuristics
+        });
+        audioEl.addEventListener('seeked', () => {
+          // Detect seeks that jump precisely to 0 without a user tap on our UI
+          // — on some Tesla builds the search icon triggers such a seek before
+          // switching focus away. Guard by checking that no buttons in our UI
+          // currently have focus.
+          const active = document.activeElement;
+          if (
+            audioEl.currentTime === 0 &&
+            (!active ||
+              (active.tagName !== 'BUTTON' &&
+                active.tagName !== 'A' &&
+                active.tagName !== 'INPUT'))
+          ) {
+            // Only treat as search intent if it happens within a short window
+            // after a stop/search signal was already seen.
+            if (window.__teslaStopTs && Date.now() - window.__teslaStopTs < 500) {
+              this.goToSearch();
+            }
+          }
+        });
       }
     },
     fetchData() {

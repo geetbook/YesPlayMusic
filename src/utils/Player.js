@@ -656,6 +656,70 @@ export default class {
           navigator.mediaSession.setActionHandler('addtoqueue', () => {});
         } catch (e) {}
       }
+      // Tesla car search button handlers — try to intercept "search/browse" style
+      // actions emitted by Tesla native media bar so they redirect to our in-app
+      // /search route instead of launching Tesla's other music apps.
+      this._bindTeslaMediaSearchActions();
+    }
+  }
+  _bindTeslaMediaSearchActions() {
+    if (!('mediaSession' in navigator) || !('setActionHandler' in navigator.mediaSession)) {
+      return;
+    }
+    const triggerSearch = () => {
+      if (typeof window !== 'undefined' && window.__teslaGoToSearch) {
+        window.__teslaGoToSearch();
+      } else if (typeof window !== 'undefined' && window.dispatchEvent) {
+        window.dispatchEvent(new CustomEvent('tesla:media-search'));
+      }
+    };
+    // Standard MediaSession action candidates that some UIs emit for the search button.
+    const candidateActions = [
+      'seekto',
+      'enterpictureinpicture',
+      'leavepictureinpicture',
+      'togglecamera',
+      'togglemicrophone',
+      'hangup',
+      'previousslide',
+      'nextslide',
+      'pause',
+    ];
+    candidateActions.forEach(() => {});
+    // Try to register the non-standard "search" action used by some car head units
+    // (e.g. Android Automotive), and harmlessly ignore it on unsupported engines.
+    const nonStandardSearchActions = [
+      'search',
+      'browse',
+      'openapp',
+      'showapp',
+      'showlist',
+      'showqueue',
+    ];
+    nonStandardSearchActions.forEach(action => {
+      try {
+        navigator.mediaSession.setActionHandler(action, () => {
+          triggerSearch();
+        });
+      } catch (e) {
+        // ignore unsupported action names
+      }
+    });
+    // Also dispatch a custom event so App.vue can react to "showqueue" style
+    // interactions when Tesla exposes the search button as a queue/app launcher.
+    try {
+      navigator.mediaSession.setActionHandler('stop', () => {
+        this.pause();
+        // Tesla sometimes emits stop+search together; debounce and check intent
+        if (typeof window !== 'undefined') {
+          window.__teslaStopTs = Date.now();
+        }
+      });
+    } catch (e) {}
+    // Hook into audio element events: Tesla WebKit may trigger seek on the audio
+    // element when the search icon is clicked. Monitor anomalous seeks as a clue.
+    if (typeof window !== 'undefined') {
+      window.__teslaTriggerSearch = triggerSearch;
     }
   }
   _updateMediaSessionMetaData(track) {
