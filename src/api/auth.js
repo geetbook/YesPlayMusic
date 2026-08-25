@@ -90,16 +90,16 @@ export function loginQrCodeCheck(key) {
  * 刷新登录
  * 说明 : 调用此接口 , 可刷新登录状态
  * - 调用例子 : /login/refresh
- * NOTE: Force GET to guarantee the request never triggers the Cloudflare
- * Worker Basic Auth layer's HTTP 405 "Method Not Allowed" edge block on
- * the music.688810.xyz custom domain (Worker rejects POST / OPTIONS for
- * non-static XHR). NeteaseCloudMusicApi accepts both GET and POST here.
+ * NOTE: NCM API calls now bypass the Cloudflare Worker edge layer entirely
+ * (baseURL is forced directly to api-enhanced-sooty-six.vercel.app), so we
+ * can safely use POST — the upstream's official verb for mutations —
+ * without any risk of HTTP 405 "Method Not Allowed" edge blocks.
  */
 export function refreshCookie() {
   return request({
     url: '/login/refresh',
-    method: 'get',
-    params: {
+    method: 'post',
+    data: {
       timestamp: new Date().getTime(),
     },
   });
@@ -108,13 +108,13 @@ export function refreshCookie() {
 /**
  * 退出登录
  * 说明 : 调用此接口 , 可退出登录
- * NOTE: Force GET for the same 405-edge-block reason as refreshCookie.
+ * NOTE: Same rationale as refreshCookie — direct upstream → safe to POST.
  */
 export function logout() {
   return request({
     url: '/logout',
-    method: 'get',
-    params: {
+    method: 'post',
+    data: {
       timestamp: new Date().getTime(),
     },
   });

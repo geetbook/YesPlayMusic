@@ -130,14 +130,18 @@ export function toplists() {
  */
 export function subscribePlaylist(params) {
   params.timestamp = new Date().getTime();
-  // Use GET instead of POST to avoid Method Not Allowed (HTTP 405) from edge
-  // layers in front of the API (Cloudflare Worker Basic Auth + Vercel Rewrite
-  // for POST XHR). Binaryify's NeteaseCloudMusicApi accepts both GET and POST
-  // on /playlist/subscribe and reads all arguments from the query string.
+  // NOTE: We're now routing Netease API calls 100% directly to the upstream
+  // (api-enhanced-sooty-six.vercel.app) so the Cloudflare Worker edge layer
+  // that was returning HTTP 405 for POST /playlist/subscribe is completely
+  // bypassed. Reverting to POST for mutation operations (the upstream
+  // officially recommends POST for writes and occasionally rate-limits GET
+  // writes with code/message "操作过于频繁，请稍后再试" to discourage bot
+  // traffic). Auth (MUSIC_U) is attached as a query-string cookie by the
+  // axios request interceptor regardless of the HTTP verb.
   return request({
     url: '/playlist/subscribe',
-    method: 'get',
-    params,
+    method: 'post',
+    data: params,
   });
 }
 
@@ -148,12 +152,12 @@ export function subscribePlaylist(params) {
  *  * @param {number} id
  */
 export function deletePlaylist(id) {
-  // Use GET instead of POST — same rationale as subscribePlaylist: avoid 405
-  // from Cloudflare Worker Basic Auth intercepting POST XHR through our edge.
+  // Since web NCM requests now bypass the Cloudflare Worker edge entirely,
+  // use POST (the upstream's official verb for write operations).
   return request({
     url: '/playlist/delete',
-    method: 'get',
-    params: { id },
+    method: 'post',
+    data: { id },
   });
 }
 
@@ -170,11 +174,12 @@ export function deletePlaylist(id) {
  */
 export function createPlaylist(params) {
   params.timestamp = new Date().getTime();
-  // Use GET instead of POST to avoid 405 from edge layers (see subscribePlaylist).
+  // Since web NCM requests now bypass the Cloudflare Worker edge entirely,
+  // use POST (the upstream's official verb for write operations).
   return request({
     url: '/playlist/create',
-    method: 'get',
-    params,
+    method: 'post',
+    data: params,
   });
 }
 
@@ -189,11 +194,12 @@ export function createPlaylist(params) {
  */
 export function addOrRemoveTrackFromPlaylist(params) {
   params.timestamp = new Date().getTime();
-  // Use GET instead of POST to avoid 405 from edge layers (see subscribePlaylist).
+  // Since web NCM requests now bypass the Cloudflare Worker edge entirely,
+  // use POST (the upstream's official verb for write operations).
   return request({
     url: '/playlist/tracks',
-    method: 'get',
-    params,
+    method: 'post',
+    data: params,
   });
 }
 

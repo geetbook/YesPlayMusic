@@ -161,10 +161,42 @@ service.interceptors.response.use(
     // error handling still surface the failure instead of hanging forever
     // (e.g. playlist likePlaylist was stuck "clicking a dead button" because
     // the rejection was not bubbling up).
-    const safeErr =
-      (error && (error.message || error.stack)) ? error : new Error(
-        (data && (data.message || data.msg)) ? (data.message || data.msg) : 'Request failed'
-      );
+    //
+    // Also: NeteaseCloudMusicApi (the upstream we call directly now) sometimes
+    // returns HTTP 405 *as its rate-limit status code* with a JSON body that
+    // contains a human-friendly `msg` / `message` like "操作过于频繁，请稍后再试".
+    // The previous error handling produced a misleading toast like "Request
+    // failed with status code 405" which made users think the Cloudflare edge
+    // Worker was still blocking the call. To prevent this confusion we
+    // *always* prefer the upstream body's textual message when one exists, and
+    // provide a friendly fallback that names the code explicitly.
+    const upstreamMsg =
+      data && (data.msg || data.message)
+        ? String(data.msg || data.message).replace(/\s+$/g, '')
+        : '';
+    const upstreamCode = data && typeof data.code !== 'undefined' ? data.code : null;
+    let finalMessage;
+    if (upstreamMsg && upstreamMsg.length > 0) {
+      // 405 from NCM body specifically means "rate limit hit / 操作过于频繁"
+      if (upstreamCode === 405) {
+        finalMessage = `${upstreamMsg}（网易云 API 速率限制，请稍后再试）`;
+      } else if (upstreamCode === 301) {
+        finalMessage = `${upstreamMsg}（请重新登录）`;
+      } else {
+        finalMessage = upstreamMsg;
+      }
+    } else if (upstreamCode !== null) {
+      finalMessage = `请求失败，错误码：${upstreamCode}`;
+    } else if (error && typeof error.message === 'string') {
+      finalMessage = error.message;
+    } else {
+      finalMessage = 'Request failed';
+    }
+    const safeErr = new Error(finalMessage);
+    // Preserve the original error's stack if available for debugging
+    if (error && error.stack) {
+      try { safeErr.stack = error.stack; } catch (_) {}
+    }
     try { safeErr.response = response; } catch (_) {}
     try { safeErr.responseData = data; } catch (_) {}
     return Promise.reject(safeErr);
