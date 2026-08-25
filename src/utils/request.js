@@ -11,34 +11,27 @@ if (process.env.IS_ELECTRON) {
     baseURL = process.env.VUE_APP_ELECTRON_API_URL_DEV;
   }
 } else {
-  // Production web build: bypass the Cloudflare Worker Basic Auth layer that
-  // sits in front of our custom domain (music.688810.xyz). The Worker correctly
-  // forwards GET requests for static assets and read-only API queries (detail,
-  // lyric, song/url) but has been observed to return HTTP 405 "Method Not
-  // Allowed" for POST /playlist/subscribe and similar mutation requests, even
-  // after we switched those endpoints to GET. By routing API calls directly
-  // to the upstream NeteaseCloudMusicApi deployment we skip the extra proxy
-  // layer entirely and eliminate the entire class of 405/403/CORS edge
-  // problems caused by the Worker.
+  // Production web build: route all Netease API requests through the same-origin
+  // /api/* proxy. This is critical for mobile (iPhone) and car browser support:
   //
-  // This is safe because:
-  //   1. The upstream API is a public Binaryify-style deployment (no auth on
-  //      the API itself — auth lives in the MUSIC_U cookie / query-string
-  //      credential that we explicitly attach below).
-  //   2. We send credentials via query string (`cookie: MUSIC_U=…`) instead
-  //      of the Cookie header, so cross-origin cookies are never required.
-  //   3. The upstream already responds with permissive CORS headers for our
-  //      use-case (GET/POST are allowed for browser XHR/fetch).
-  //   4. Vercel Rewrite on the frontend project still routes `/api/*` through
-  //      as a fallback (keeps unblock API endpoints and legacy URLs working).
+  //   - The custom domain music.688810.xyz is proxied through Cloudflare, which
+  //     is fully accessible on China Mobile/Telecom networks.
+  //   - The previous approach (commit 62f3526) bypassed Cloudflare by sending
+  //     requests directly to api-enhanced-sooty-six.vercel.app. This worked on
+  //     desktop (VPN) but vercel.app subdomains are blocked on Chinese mobile
+  //     networks → iPhone and car browser showed nav bar but blank content.
+  //   - Vercel vercel.json rewrites /api/* → upstream NCM API, so /api works
+  //     as a transparent proxy without exposing vercel.app to the client.
+  //   - Cloudflare Worker Basic Auth has /api/* in its whitelist, so these
+  //     requests pass through without 401 challenges.
+  //   - The 405 errors previously attributed to the Worker were actually NCM
+  //     API body.code=405 rate-limit responses (confirmed via WebFetch), not
+  //     Worker HTTP 405s. The safeErr handler below correctly surfaces these
+  //     as friendly toast messages.
   //
-  // NOTE: We always force this direct upstream for web builds now, regardless
-  // of what VUE_APP_NETEASE_API_URL was set to during the Vercel build. Past
-  // builds had env='/api' or env=undefined and produced mixed traffic where
-  // some requests leaked through the Worker edge (e.g. POST /login/refresh
-  // -> 405). Going direct for 100% of Netease API calls guarantees no 405.
-  const DIRECT_UPSTREAM = 'https://api-enhanced-sooty-six.vercel.app';
-  baseURL = DIRECT_UPSTREAM;
+  // MUSIC_U credential is passed via query string (not Cookie header) so it
+  // survives the cross-domain rewrite hop from music.688810.xyz to the upstream.
+  baseURL = '/api';
 }
 
 const service = axios.create({
