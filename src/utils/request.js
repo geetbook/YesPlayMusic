@@ -35,14 +35,18 @@ service.interceptors.request.use(function (config) {
     //   and the UI silently did nothing.
     const musicU = getCookie('MUSIC_U');
     if (musicU !== null && musicU !== undefined) {
-      // Don't overwrite if the caller already added a cookie param (rare).
+      // Encode the cookie *value* so characters like "+/=;%& ," don't corrupt
+      // the query string when passed as a GET param (all playlist operations
+      // now run through GET to avoid 405 from the Cloudflare edge layer).
+      const encodedCookie =
+        'MUSIC_U=' + encodeURIComponent(String(musicU)) + ';';
       if (!config.params.cookie) {
-        config.params.cookie = `MUSIC_U=${musicU};`;
+        config.params.cookie = encodedCookie;
       } else if (
         typeof config.params.cookie === 'string' &&
         config.params.cookie.indexOf('MUSIC_U=') === -1
       ) {
-        config.params.cookie = `MUSIC_U=${musicU}; ` + config.params.cookie;
+        config.params.cookie = encodedCookie + ' ' + config.params.cookie;
       }
     }
   } else {

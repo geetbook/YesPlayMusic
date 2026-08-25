@@ -130,9 +130,13 @@ export function toplists() {
  */
 export function subscribePlaylist(params) {
   params.timestamp = new Date().getTime();
+  // Use GET instead of POST to avoid Method Not Allowed (HTTP 405) from edge
+  // layers in front of the API (Cloudflare Worker Basic Auth + Vercel Rewrite
+  // for POST XHR). Binaryify's NeteaseCloudMusicApi accepts both GET and POST
+  // on /playlist/subscribe and reads all arguments from the query string.
   return request({
     url: '/playlist/subscribe',
-    method: 'post',
+    method: 'get',
     params,
   });
 }
@@ -144,9 +148,11 @@ export function subscribePlaylist(params) {
  *  * @param {number} id
  */
 export function deletePlaylist(id) {
+  // Use GET instead of POST — same rationale as subscribePlaylist: avoid 405
+  // from Cloudflare Worker Basic Auth intercepting POST XHR through our edge.
   return request({
     url: '/playlist/delete',
-    method: 'post',
+    method: 'get',
     params: { id },
   });
 }
@@ -164,9 +170,10 @@ export function deletePlaylist(id) {
  */
 export function createPlaylist(params) {
   params.timestamp = new Date().getTime();
+  // Use GET instead of POST to avoid 405 from edge layers (see subscribePlaylist).
   return request({
     url: '/playlist/create',
-    method: 'post',
+    method: 'get',
     params,
   });
 }
@@ -182,9 +189,10 @@ export function createPlaylist(params) {
  */
 export function addOrRemoveTrackFromPlaylist(params) {
   params.timestamp = new Date().getTime();
+  // Use GET instead of POST to avoid 405 from edge layers (see subscribePlaylist).
   return request({
     url: '/playlist/tracks',
-    method: 'post',
+    method: 'get',
     params,
   });
 }
