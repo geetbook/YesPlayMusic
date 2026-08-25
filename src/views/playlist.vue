@@ -427,24 +427,55 @@ export default {
     },
     likePlaylist(toast = false) {
       if (!isAccountLoggedIn()) {
-        this.showToast(locale.t('toast.needToLogin'));
+        this.showToast(
+          this.$t
+            ? this.$t('toast.needToLogin')
+            : '请先使用账号登录（账号密码或二维码登录网易云账号）后才能收藏歌单'
+        );
         return;
       }
+      const wantSubscribe = !this.playlist.subscribed; // true = 收藏, false = 取消
+      const playlistId = this.playlist && this.playlist.id ? String(this.playlist.id) : String(this.id);
       subscribePlaylist({
-        id: this.playlist.id,
-        t: this.playlist.subscribed ? 2 : 1,
-      }).then(data => {
-        if (data.code === 200) {
-          this.playlist.subscribed = !this.playlist.subscribed;
-          if (toast === true)
-            this.showToast(
-              this.playlist.subscribed ? '已保存到音乐库' : '已从音乐库删除'
-            );
-        }
-        getPlaylistDetail(this.id, true).then(data => {
-          this.playlist = data.playlist;
+        id: playlistId,
+        t: wantSubscribe ? 1 : 2,
+      })
+        .then(data => {
+          const ok = data && (data.code === 200 || data.code === 201);
+          if (ok) {
+            this.playlist.subscribed = wantSubscribe;
+            if (toast === true)
+              this.showToast(
+                wantSubscribe ? '已保存到音乐库' : '已从音乐库删除'
+              );
+          } else {
+            const msg =
+              (data && (data.msg || data.message)) ||
+              (data && data.code ? `错误码 ${data.code}` : '未知错误');
+            console.error('[likePlaylist] subscribe failed', data);
+            if (toast || true) {
+              this.showToast(`${wantSubscribe ? '保存到音乐库失败' : '取消收藏失败'}：${msg}`);
+            }
+            if (data && data.code === 301) {
+              this.showToast('登录已过期，请重新登录');
+            }
+          }
+          return getPlaylistDetail(this.id, true).then(detail => {
+            if (detail && detail.playlist) {
+              this.playlist = detail.playlist;
+            }
+          });
+        })
+        .catch(err => {
+          console.error('[likePlaylist] request error', err);
+          const reason =
+            (err && (err.message || err.msg || err.stack)) ||
+            (err && err.responseData && (err.responseData.msg || err.responseData.message)) ||
+            '网络异常或服务器无响应';
+          this.showToast(
+            `${wantSubscribe ? '保存到音乐库失败' : '取消收藏失败'}：${reason}`
+          );
         });
-      });
     },
     loadData(id, next = undefined) {
       this.id = id;
