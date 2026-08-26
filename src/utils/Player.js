@@ -222,6 +222,7 @@ export default class {
         this._howler?.seek(localStorage.getItem('playerCurrentTrackTime') ?? 0);
       }); // update audio source and init howler
       this._initMediaSession();
+      this._refreshMediaSessionTrackActions();
     }
 
     this._setIntervals();
@@ -283,38 +284,41 @@ export default class {
     if (!('mediaSession' in navigator) || !('setActionHandler' in navigator.mediaSession)) {
       return;
     }
-    const hasPrev = this._hasPrevTrack();
-    const hasNext = this._hasNextTrack();
-    // Re-register previoustrack so Tesla re-evaluates enabled state
+    // Always register valid handlers — never set to null.
+    // Tesla car browser caches handler state at page load and may not
+    // re-evaluate when handlers are set to null and then back to a function.
+    // Instead, check validity inside the callback so buttons stay enabled.
     try {
-      navigator.mediaSession.setActionHandler('previoustrack', hasPrev ? () => {
-        this.playPrevTrack();
-      } : null);
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (this._hasPrevTrack()) {
+          this.playPrevTrack();
+        }
+      });
     } catch (e) {}
     try {
-      navigator.mediaSession.setActionHandler('nexttrack', hasNext ? () => {
-        this._playNextTrack(this.isPersonalFM);
-      } : null);
-    } catch (e) {}
-    // Re-register duplicates under alternative action names used by some
-    // Tesla / Chromium builds to surface next/prev transport controls.
-    try {
-      navigator.mediaSession.setActionHandler('playnext', hasNext ? () => {
-        this._playNextTrack(this.isPersonalFM);
-      } : null);
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        if (this._hasNextTrack()) {
+          this._playNextTrack(this.isPersonalFM);
+        }
+      });
     } catch (e) {}
     try {
-      navigator.mediaSession.setActionHandler('playprevious', hasPrev ? () => {
-        this.playPrevTrack();
-      } : null);
+      navigator.mediaSession.setActionHandler('playnext', () => {
+        if (this._hasNextTrack()) {
+          this._playNextTrack(this.isPersonalFM);
+        }
+      });
     } catch (e) {}
-    // Keep seeking/stop handlers alive for the new session too
+    try {
+      navigator.mediaSession.setActionHandler('playprevious', () => {
+        if (this._hasPrevTrack()) {
+          this.playPrevTrack();
+        }
+      });
+    } catch (e) {}
     try {
       navigator.mediaSession.setActionHandler('stop', () => {
         this.pause();
-        if (typeof window !== 'undefined') {
-          window.__teslaStopTs = Date.now();
-        }
       });
     } catch (e) {}
   }
@@ -733,6 +737,7 @@ export default class {
       // actions emitted by Tesla native media bar so they redirect to our in-app
       // /search route instead of launching Tesla's other music apps.
       this._bindTeslaMediaSearchActions();
+      this._refreshMediaSessionTrackActions();
     }
   }
   _bindTeslaMediaSearchActions() {
@@ -1107,6 +1112,7 @@ export default class {
       type: playlistSourceType,
       id: playlistSourceID,
     };
+    this._refreshMediaSessionTrackActions();
     if (this.shuffle) this._shuffleTheList(autoPlayTrackID);
     if (autoPlayTrackID === 'first') {
       this._replaceCurrentTrack(this.list[0]);
