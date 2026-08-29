@@ -1001,15 +1001,57 @@ export default class {
     });
   }
   _cacheNextTrack() {
-    let nextTrackID = this._isPersonalFM
-      ? this._personalFMNextTrack?.id ?? 0
+    // 下一首歌可能是 ID（普通播放列表）或完整对象（addTrackToPlayNext 直接塞对象时），
+    // 也可能是私人 FM 的 _personalFMNextTrack。
+    let nextTrackOrID = this._isPersonalFM
+      ? this._personalFMNextTrack ?? 0
       : this._getNextTrack()[0];
-    if (!nextTrackID) return;
-    if (this._personalFMTrack.id == nextTrackID) return;
-    getTrackDetail(nextTrackID).then(data => {
-      let track = data.songs[0];
-      this._getAudioSource(track);
-    });
+    if (!nextTrackOrID) return;
+    if (this._personalFMTrack.id == (nextTrackOrID.id || nextTrackOrID)) return;
+
+    // FAST PATH：_tracksById 命中就不用调 getTrackDetail（省一次 /song/detail RTT）
+    let trackPromise;
+    if (nextTrackOrID && typeof nextTrackOrID === 'object' && nextTrackOrID.id && nextTrackOrID.name) {
+      trackPromise = Promise.resolve(nextTrackOrID);
+    } else {
+      const id = Number(nextTrackOrID);
+      if (!id) return;
+      const cached = this._tracksById.get(id);
+      trackPromise = cached && cached.name
+        ? Promise.resolve(cached)
+        : getTrackDetail(id).then(data => data?.songs?.[0]).catch(() => null);
+    }
+
+    // 【核心】拿 URL 后 **真的 new Howl(preload:true)** 把音频流拉进 HTTP cache，
+    // 这样用户真正点下一首时 Howler 直接 canplay → play ≤100ms，体感秒切。
+    trackPromise.then(track => {
+      if (!track || !track.id) return;
+      if (this._tracksById && track.name) this._tracksById.set(Number(track.id), track);
+      return this._getAudioSource(track)
+        .then(url => {
+          if (!url || typeof url !== 'string') return;
+          const safeUrl = url.startsWith('blob:') ? url : url.replace(/^http:/, 'https:');
+          try {
+            // 把 URL 放进 Howler 实例池，preload=true 让它立即 fetch 到内存/磁盘缓存。
+            // 不监听 onerror/onloaderror（只是预载，失败时真实播放流程会兜底重试 + unblock）
+            const preloader = new Howl({
+              src: [safeUrl],
+              html5: true,
+              preload: true,
+              format: ['mp3', 'flac'],
+            });
+            // WeakMap 风格存一下（没有引用也没关系，GC 不影响已经完成的 HTTP disk cache）
+            this._preloadHowlers = this._preloadHowlers || [];
+            this._preloadHowlers.push({ forTrackId: track.id, howl: preloader, at: Date.now() });
+            // 清旧的（最多留 3 个）
+            if (this._preloadHowlers.length > 3) {
+              const old = this._preloadHowlers.shift();
+              try { old.howl.unload(); } catch (_) {}
+            }
+          } catch (_) { /* Howler 在某些老环境构造也可能抛 */ }
+        })
+        .catch(() => {});
+    }).catch(() => {});
   }
   _loadSelfFromLocalStorage() {
     const player = JSON.parse(localStorage.getItem('player'));
