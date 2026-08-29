@@ -73,13 +73,14 @@ export default class {
     this._personalFMNextLoading = false; // 是否正在缓存私人FM的下一首歌曲
 
     // 播放信息
-    this._list = []; // 播放列表
+    this._list = []; // 播放列表（track IDs）
     this._current = 0; // 当前播放歌曲在播放列表里的index
     this._shuffledList = []; // 被随机打乱的播放列表，随机播放模式下会使用此播放列表
     this._shuffledCurrent = 0; // 当前播放歌曲在随机列表里面的index
     this._playlistSource = { type: 'album', id: 123 }; // 当前播放列表的信息
     this._currentTrack = { id: 86827685 }; // 当前播放歌曲的详细信息
-    this._playNextList = []; // 当这个list不为空时，会优先播放这个list的歌
+    this._playNextList = []; // 当这个list不为空时，会优先播放这个list的歌（元素：ID 或 完整track对象）
+    this._tracksById = new Map(); // id → 完整 track 对象。命中就不再 await getTrackDetail。
     this._isPersonalFM = false; // 是否是私人FM模式
     this._personalFMTrack = { id: 0 }; // 私人FM当前歌曲
     this._personalFMNextTrack = {
@@ -889,24 +890,75 @@ export default class {
     });
   }
   _replaceCurrentTrack(
-    id,
+    idOrTrack,
     autoplay = true,
     ifUnplayableThen = UNPLAYABLE_CONDITION.PLAY_NEXT_TRACK
   ) {
     if (autoplay && this._currentTrack.name) {
       this._scrobble(this.currentTrack, this._howler?.seek());
     }
-    return getTrackDetail(id).then(data => {
-      const track = data.songs[0];
-      this._currentTrack = track;
-      this._updateMediaSessionMetaData(track);
+    // ==== FAST PATH：如果传进来是完整 track 对象，或 _tracksById 里能命中，
+    // 直接开始取音频源 Howler 播放（后台异步 getTrackDetail 补字段，不阻塞用户点击）。
+    // 这让"切歌 click→发声"从原先 5–6s 压缩到"仅 Howler 加载音频"的 300–1500ms。
+    const id =
+      typeof idOrTrack === 'number' || typeof idOrTrack === 'string'
+        ? Number(idOrTrack)
+        : idOrTrack?.id;
+    const prefetchedTrack =
+      idOrTrack && typeof idOrTrack === 'object' && idOrTrack.id
+        ? idOrTrack
+        : this._tracksById.get(id) || null;
+    if (prefetchedTrack && prefetchedTrack.id && prefetchedTrack.name) {
+      this._currentTrack = prefetchedTrack;
+      this._updateMediaSessionMetaData(prefetchedTrack);
+      // 后台异步 getTrackDetail 补全缺失字段（privileges、版权号、高质量封面等），
+      // 不 await，不阻塞 Howler 立刻发声。
+      getTrackDetail(id)
+        .then((data) => {
+          const fullTrack = data?.songs?.[0];
+          if (fullTrack && fullTrack.id && this.currentTrackID === Number(fullTrack.id)) {
+            // 合并字段：保留原来的 playable/reason 标签（playlist 已算好），
+            // 覆盖缺的 dt/al/privilege 等
+            const merged = {
+              ...fullTrack,
+              ...(prefetchedTrack.playable !== undefined
+                ? { playable: prefetchedTrack.playable, reason: prefetchedTrack.reason }
+                : {}),
+            };
+            this._currentTrack = merged;
+            this._tracksById.set(Number(fullTrack.id), merged);
+            this._updateMediaSessionMetaData(merged);
+          } else if (fullTrack) {
+            this._tracksById.set(Number(fullTrack.id), fullTrack);
+          }
+        })
+        .catch(() => {});
       return this._replaceCurrentTrackAudio(
-        track,
+        prefetchedTrack,
         autoplay,
         true,
         ifUnplayableThen
       );
-    });
+    }
+    // Slow path：没有预存完整对象，fallback 到 getTrackDetail
+    return getTrackDetail(id)
+      .then((data) => {
+        const track = data.songs[0];
+        if (track && track.id) this._tracksById.set(Number(track.id), track);
+        this._currentTrack = track;
+        this._updateMediaSessionMetaData(track);
+        return this._replaceCurrentTrackAudio(
+          track,
+          autoplay,
+          true,
+          ifUnplayableThen
+        );
+      })
+      .catch((err) => {
+        store.dispatch('showToast', '加载歌曲信息失败');
+        console.error('[Player] getTrackDetail failed:', err);
+        return false;
+      });
   }
   /**
    * @returns 是否成功加载音频，并使用加载完成的音频替换了howler实例
@@ -1223,19 +1275,21 @@ export default class {
   }
   playNextTrack() {
     // TODO: 切换歌曲时增加加载中的状态
-    const [trackID, index] = this._getNextTrack();
-    if (trackID === undefined) {
+    const [trackIDOrTrack, index] = this._getNextTrack();
+    if (trackIDOrTrack === undefined || trackIDOrTrack === null) {
       this._howler?.stop();
       this._setPlaying(false);
       return false;
     }
+    // _playNextList.shift() 逻辑保持与旧一致（它 push 的时候就存了 trackID/track 对象）
     let next = index;
     if (index === INDEX_IN_PLAY_NEXT) {
       this._playNextList.shift();
       next = this.current;
     }
     this.current = next;
-    this._replaceCurrentTrack(trackID);
+    // 如果 _playNextList 存的是完整对象，就 FAST PATH 直接用；否则从 _tracksById 按 ID 找（id 还在 playlist 里）
+    this._replaceCurrentTrack(trackIDOrTrack);
     return true;
   }
   async playNextFMTrack() {
@@ -1391,7 +1445,8 @@ export default class {
     trackIDs,
     playlistSourceID,
     playlistSourceType,
-    autoPlayTrackID = 'first'
+    autoPlayTrackID = 'first',
+    tracks = null
   ) {
     this._isPersonalFM = false;
     this.list = trackIDs;
@@ -1400,19 +1455,46 @@ export default class {
       type: playlistSourceType,
       id: playlistSourceID,
     };
+    // ==== FAST PATH：把 caller 提供的完整 tracks 对象写入 _tracksById，
+    // 之后 _replaceCurrentTrack（下一首/上一首/点击歌单列表都走它）都不用再等 getTrackDetail。
+    this._tracksById = new Map();
+    const trackArr = Array.isArray(tracks) ? tracks : [];
+    if (trackArr.length) {
+      for (const t of trackArr) {
+        if (t && t.id && t.name) {
+          this._tracksById.set(Number(t.id), t);
+        }
+      }
+    }
     this._refreshMediaSessionTrackActions();
     if (this.shuffle) this._shuffleTheList(autoPlayTrackID);
     if (autoPlayTrackID === 'first') {
-      this._replaceCurrentTrack(this.list[0]);
+      const firstId = this.list[0];
+      const firstTrack =
+        this._tracksById.get(Number(firstId)) ?? firstId;
+      this._replaceCurrentTrack(firstTrack);
     } else {
-      this.current = this.list.indexOf(autoPlayTrackID);
-      this._replaceCurrentTrack(autoPlayTrackID);
+      this.current = this.list.indexOf(
+        typeof autoPlayTrackID === 'object' && autoPlayTrackID?.id
+          ? autoPlayTrackID.id
+          : autoPlayTrackID
+      );
+      const startTrack =
+        (typeof autoPlayTrackID === 'object' && autoPlayTrackID?.id && autoPlayTrackID) ||
+        this._tracksById.get(
+          Number(
+            typeof autoPlayTrackID === 'object' ? autoPlayTrackID.id : autoPlayTrackID
+          )
+        ) ||
+        autoPlayTrackID;
+      this._replaceCurrentTrack(startTrack);
     }
   }
   playAlbumByID(id, trackID = 'first') {
     getAlbum(id).then(data => {
-      let trackIDs = data.songs.map(t => t.id);
-      this.replacePlaylist(trackIDs, id, 'album', trackID);
+      const tracks = Array.isArray(data?.songs) ? data.songs : [];
+      const trackIDs = tracks.map(t => t.id);
+      this.replacePlaylist(trackIDs, id, 'album', trackID, tracks);
     });
   }
   playPlaylistByID(id, trackID = 'first', noCache = false) {
@@ -1420,36 +1502,44 @@ export default class {
       `[debug][Player.js] playPlaylistByID 👉 id:${id} trackID:${trackID} noCache:${noCache}`
     );
     getPlaylistDetail(id, noCache).then(data => {
-      let trackIDs = data.playlist.trackIds.map(t => t.id);
-      this.replacePlaylist(trackIDs, id, 'playlist', trackID);
+      const tracks = Array.isArray(data?.playlist?.tracks) ? data.playlist.tracks : [];
+      const trackIDs = (data?.playlist?.trackIds || []).map(t => t.id);
+      this.replacePlaylist(trackIDs, id, 'playlist', trackID, tracks);
     });
   }
   playArtistByID(id, trackID = 'first') {
     getArtist(id).then(data => {
-      let trackIDs = data.hotSongs.map(t => t.id);
-      this.replacePlaylist(trackIDs, id, 'artist', trackID);
+      const tracks = Array.isArray(data?.hotSongs) ? data.hotSongs : [];
+      const trackIDs = tracks.map(t => t.id);
+      this.replacePlaylist(trackIDs, id, 'artist', trackID, tracks);
     });
   }
   playTrackOnListByID(id, listName = 'default') {
     if (listName === 'default') {
       this._current = this._list.findIndex(t => t === id);
     }
-    this._replaceCurrentTrack(id);
+    this._replaceCurrentTrack(this._tracksById.get(Number(id)) ?? id);
   }
   playIntelligenceListById(id, trackID = 'first', noCache = false) {
     getPlaylistDetail(id, noCache).then(data => {
+      const trackArr = Array.isArray(data?.playlist?.tracks) ? data.playlist.tracks : [];
       const randomId = Math.floor(
-        Math.random() * (data.playlist.trackIds.length + 1)
+        Math.random() * ((data?.playlist?.trackIds?.length || 0) + 1)
       );
-      const songId = data.playlist.trackIds[randomId].id;
+      const songId = (data?.playlist?.trackIds || [])[randomId]?.id;
       intelligencePlaylist({ id: songId, pid: id }).then(result => {
-        let trackIDs = result.data.map(t => t.id);
-        this.replacePlaylist(trackIDs, id, 'playlist', trackID);
+        const tracks = Array.isArray(result?.data) ? result.data : [];
+        const trackIDs = tracks.map(t => t.id);
+        this.replacePlaylist(trackIDs, id, 'playlist', trackID, tracks);
       });
     });
   }
-  addTrackToPlayNext(trackID, playNow = false) {
-    this._playNextList.push(trackID);
+  addTrackToPlayNext(trackIdOrTrack, playNow = false) {
+    // 支持传完整 track 对象（FAST PATH）或者仅 ID。存入 _tracksById 以便下一首直接用。
+    if (trackIdOrTrack && typeof trackIdOrTrack === 'object' && trackIdOrTrack.id) {
+      this._tracksById.set(Number(trackIdOrTrack.id), trackIdOrTrack);
+    }
+    this._playNextList.push(trackIdOrTrack);
     if (playNow) {
       this.playNextTrack();
     }

@@ -65,12 +65,15 @@ export default {
         this.showToast(locale.t('toast.needToLogin'));
         return;
       }
-      let trackIDs = this.dailyTracks.map(t => t.id);
+      const tracks = Array.isArray(this.dailyTracks) ? this.dailyTracks : [];
+      const trackIDs = tracks.map(t => t.id);
+      // FAST PATH：dailyTracks 已经是完整对象
       this.$store.state.player.replacePlaylist(
         trackIDs,
         '/daily/songs',
         'url',
-        this.dailyTracks[0].id
+        trackIDs[0],
+        tracks
       );
     },
   },

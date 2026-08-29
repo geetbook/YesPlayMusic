@@ -418,11 +418,14 @@ export default {
     ...mapActions(['playFirstTrackOnList', 'playTrackOnListByID', 'showToast']),
     playPlaylistByID(trackID = 'first') {
       let trackIDs = this.playlist.trackIds.map(t => t.id);
+      // FAST PATH：把 this.tracks（已经从 getPlaylistDetail + loadMore 加载好的完整对象）传下去，
+      // Player._replaceCurrentTrack 不再 await getTrackDetail 就直接取音频源，节省 500–2000ms。
       this.$store.state.player.replacePlaylist(
         trackIDs,
         this.playlist.id,
         'playlist',
-        trackID
+        trackID,
+        Array.isArray(this.tracks) ? this.tracks : this.playlist.tracks || []
       );
     },
     likePlaylist(toast = false) {

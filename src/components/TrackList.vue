@@ -207,13 +207,14 @@ export default {
         this.player.playPlaylistByID(this.id, trackID);
       } else if (this.dbclickTrackFunc === 'playAList') {
         let trackIDs = this.tracks.map(t => t.id || t.songId);
-        this.player.replacePlaylist(trackIDs, this.id, 'artist', trackID);
+        // FAST PATH：this.tracks 是本组件 props 进来的完整 song 对象数组（带 name/ar/al/dt/privilege）
+        this.player.replacePlaylist(trackIDs, this.id, 'artist', trackID, this.tracks || []);
       } else if (this.dbclickTrackFunc === 'dailyTracks') {
         let trackIDs = this.tracks.map(t => t.id);
-        this.player.replacePlaylist(trackIDs, '/daily/songs', 'url', trackID);
+        this.player.replacePlaylist(trackIDs, '/daily/songs', 'url', trackID, this.tracks || []);
       } else if (this.dbclickTrackFunc === 'playCloudDisk') {
         let trackIDs = this.tracks.map(t => t.id || t.songId);
-        this.player.replacePlaylist(trackIDs, this.id, 'cloudDisk', trackID);
+        this.player.replacePlaylist(trackIDs, this.id, 'cloudDisk', trackID, this.tracks || []);
       }
     },
     playThisListDefault(trackID) {
@@ -223,14 +224,29 @@ export default {
         this.player.playAlbumByID(this.id, trackID);
       } else if (this.type === 'tracklist') {
         let trackIDs = this.tracks.map(t => t.id);
-        this.player.replacePlaylist(trackIDs, this.id, 'artist', trackID);
+        // FAST PATH：this.tracks 是完整对象数组
+        this.player.replacePlaylist(trackIDs, this.id, 'artist', trackID, this.tracks || []);
       }
     },
     play() {
-      this.player.addTrackToPlayNext(this.rightClickedTrack.id, true);
+      // 右键菜单的"立即播放"（加进 _playNextList 并立即切）
+      // 如果右键点的这首在 this.tracks 里能找到完整对象，
+      // 就把完整对象直接传 addTrackToPlayNext → FAST PATH 不等待 getTrackDetail。
+      const fullTrack =
+        Array.isArray(this.tracks) && this.rightClickedTrack && this.rightClickedTrack.id
+          ? this.tracks.find(t => Number(t.id) === Number(this.rightClickedTrack.id)) ||
+            this.rightClickedTrack
+          : this.rightClickedTrack;
+      this.player.addTrackToPlayNext(fullTrack, true);
     },
     addToQueue() {
-      this.player.addTrackToPlayNext(this.rightClickedTrack.id);
+      // 右键"加到播放队列"：能用完整对象就用完整的，这样真正轮到它播放时不卡
+      const fullTrack =
+        Array.isArray(this.tracks) && this.rightClickedTrack && this.rightClickedTrack.id
+          ? this.tracks.find(t => Number(t.id) === Number(this.rightClickedTrack.id)) ||
+            this.rightClickedTrack
+          : this.rightClickedTrack;
+      this.player.addTrackToPlayNext(fullTrack);
     },
     like() {
       this.likeATrack(this.rightClickedTrack.id);

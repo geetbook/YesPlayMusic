@@ -315,11 +315,14 @@ export default {
     },
     playPopularSongs(trackID = 'first') {
       let trackIDs = this.popularTracks.map(t => t.id);
+      // FAST PATH：popularTracks 本身就是完整对象（getArtist 返回的 hotSongs），
+      // 直接给 Player 省一次 getTrackDetail 等待。
       this.$store.state.player.replacePlaylist(
         trackIDs,
         this.artist.id,
         'artist',
-        trackID
+        trackID,
+        this.popularTracks || []
       );
     },
     followArtist() {
