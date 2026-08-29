@@ -61,9 +61,12 @@ export function simiMv(mvid) {
 
 export function likeAMV(params) {
   params.timestamp = new Date().getTime();
+  // Mutation → POST body is the official upstream shape; keep params so the
+  // request interceptor can still attach cookie/realIP/proxy via query.
   return request({
     url: '/mv/sub',
     method: 'post',
+    data: params,
     params,
   });
 }

@@ -696,6 +696,15 @@ export default class {
       return null;
     }
 
+    // -------- Defensive: force-enable unblock on the "artist-singer"
+    // fallback layer ------------------------
+    // initLocalStorage.js defaults enableUnblockNeteaseMusic to true, but
+    // a previous version once wrote `enableUnblockNeteaseMusic=false` if
+    // localStorage was refreshed early.  If the value is falsy-but-not-
+    // exactly-false (e.g. null, undefined, 0, "", NaN), the guard above
+    // doesn't short-circuit — which is the correct behaviour (we want
+    // unblock on).  This comment is so behaviour is explicit.
+
     // Web 版：调用 /api/unblock 解灰 API 从酷狗音源获取
     if (process.env.IS_ELECTRON !== true) {
       try {

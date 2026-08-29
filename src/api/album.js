@@ -71,9 +71,14 @@ export function albumDynamicDetail(id) {
  * @param {number} params.t
  */
 export function likeAAlbum(params) {
+  // Write op -> POST body (was POST with only query params previously; both
+  // kept so axios query-param cookie/realIP injection remains intact while
+  // the NCM upstream receives the id/t payload in form body, which is the
+  // officially-documented way to invoke /album/sub for rate-limit reasons).
   return request({
     url: '/album/sub',
     method: 'post',
+    data: params,
     params,
   });
 }

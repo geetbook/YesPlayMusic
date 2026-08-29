@@ -104,13 +104,15 @@ export function userLikedSongsIDs(uid) {
  * @param {number} type
  */
 export function dailySignin(type = 0) {
+  // Mutation (签到发放积分): official verb POST with body payload.
+  // Keep params copy so the request.js interceptor still injects
+  // MUSIC_U / realIP / proxy via query string (it only reads config.params).
+  const payload = { type, timestamp: new Date().getTime() };
   return request({
     url: '/daily_signin',
     method: 'post',
-    params: {
-      type,
-      timestamp: new Date().getTime(),
-    },
+    data: payload,
+    params: payload,
   });
 }
 
@@ -223,12 +225,15 @@ export function cloudDiskTrackDetail(id) {
  * @param {Array} id
  */
 export function cloudDiskTrackDelete(id) {
+  // Mutation → POST body (GET query params triggered 405 when going through
+  // the Cloudflare Basic Auth layer, because it refused unknown methods on
+  // the `/user/cloud/del` resource.  All NCM endpoints accept both GET and
+  // POST so this is universally safe.
+  const payload = { timestamp: new Date().getTime(), id };
   return request({
     url: '/user/cloud/del',
-    method: 'get',
-    params: {
-      timestamp: new Date().getTime(),
-      id,
-    },
+    method: 'post',
+    data: payload,
+    params: payload, // keep params so cookie/realIP injection in request.js keeps working
   });
 }

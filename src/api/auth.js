@@ -13,9 +13,12 @@ import request from '@/utils/request';
  * @param {string=} params.md5_password
  */
 export function loginWithPhone(params) {
+  // Write op (auth state change + Set-Cookie): POST body + keep params for
+  // the MUSIC_U/realIP/proxy interceptor injection in request.js.
   return request({
     url: '/login/cellphone',
     method: 'post',
+    data: params,
     params,
   });
 }
@@ -31,9 +34,12 @@ export function loginWithPhone(params) {
  * @param {string=} params.md5_password
  */
 export function loginWithEmail(params) {
+  // Write op (auth state change + Set-Cookie): POST body + keep params for
+  // the cookie/realIP injection that runs via axios params interceptor.
   return request({
     url: '/login',
     method: 'post',
+    data: params,
     params,
   });
 }

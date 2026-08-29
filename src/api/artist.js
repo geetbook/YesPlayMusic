@@ -105,9 +105,11 @@ export function artistMv(params) {
  * @param {number} params.t
  */
 export function followAArtist(params) {
+  // Mutation → POST body + keep query params (cookie/realIP injection).
   return request({
     url: '/artist/sub',
     method: 'post',
+    data: params,
     params,
   });
 }
@@ -119,9 +121,14 @@ export function followAArtist(params) {
  * @param {number} id
  */
 export function similarArtists(id) {
+  // Idempotent read — kept as POST for historical compatibility with the
+  // NCM upstream module (both methods work).  Use POST body + query so
+  // cookie/realIP injection keeps flowing.
+  const payload = { id };
   return request({
     url: '/simi/artist',
     method: 'post',
-    params: { id },
+    data: payload,
+    params: payload,
   });
 }
