@@ -58,6 +58,7 @@ const excludeSaveKeys = [
   '_duration',            // 歌曲时长（Howler 或 dt 派生，重新计算即可）
   // —— Map / 纯 runtime 索引缓存 ——
   '_tracksById',          // new Map()，JSON 无法往返
+  '_trialUrlMarkers',     // new Map(id → {url, trial, br})，runtime only，JSON 化后也无意义
   'createdBlobRecords',   // Blob URL revoke 表，reload 后全部失效
   // —— 索引 / 播放位置（脏值会让 replacePlaylist autoPlayTrackID 变成越界 ID）——
   '_current',
@@ -558,7 +559,7 @@ export default class {
       src: [source],
       html5: true,
       preload: true,
-      format: ['mp3', 'flac'],
+      format: ['mp3'],
       onend: () => {
         this._nextTrackCallback();
       },
@@ -591,27 +592,31 @@ export default class {
         // /api/unblock serverless endpoint once as a final attempt
         // specifically for "copyright block / all sources exhausted"
         // class of failures (the default reason below).
-        const looksCopyrightBlock =
-          srcUrl.length >= 10 &&
-          !srcUrl.startsWith('http://') &&
-          !srcUrl.includes('music.163.com/outer') &&
-          !srcUrl.includes('kugou') &&
-          !srcUrl.includes('qq.com') &&
-          !srcUrl.includes('kuwo') &&
-          !srcUrl.includes('migu');
+        //
+        // NOTE (2026-08): We deliberately don't exclude music.163.com/outer
+        // or any third-party source here.  If /song/url (Enhanced's
+        // gray-unlock) yielded only a short trial fragment that the
+        // browser rejected OR the official outer URL got blocked by
+        // Chrome's ORB, the *only* recovery path left is to try a
+        // different third-party source via /api/unblock.  Previously this
+        // filter prevented recovery and caused the dreaded "不支持的格式"
+        // toast even when kugou/qq/kuwo/migu *did* have a working link.
+        const worthRetry =
+          srcUrl.length >= 10 && !srcUrl.startsWith('blob:');
         let finalFallbackTried = false;
-        if (looksCopyrightBlock && this.currentTrack) {
+        if (worthRetry && this.currentTrack) {
           const tr = this.currentTrack;
           try {
             const artist = (tr.ar || tr.artists || []).map(a => a.name).join(' ');
             const q = new URLSearchParams({ id: String(tr.id), name: tr.name, artist });
             finalFallbackTried = true;
-            // ---- Timeout (3s) so a slow unblock endpoint doesn't
-            // hang the cutover for 5-6s before the user even sees a
-            // toast.  If the first 2 rounds of unblock above all came
-            // back empty, a 3rd 6s+ call is not worth waiting for.
+            // ---- Timeout 5s (previously 3s): some of the 6 unblock
+            // sources run in serverless regions with cold start; the old
+            // 3s deadline killed the very first Vercel cold-start of the
+            // day for kugou/qq.  5s is still fast enough to keep UX
+            // snappy and lets the first cold-start succeed.
             const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-            const timeoutId = controller ? setTimeout(() => controller.abort(), 3000) : null;
+            const timeoutId = controller ? setTimeout(() => controller.abort(), 5000) : null;
             let r;
             try {
               r = await fetch(`/api/unblock?${q.toString()}`, controller ? { signal: controller.signal } : undefined);
@@ -624,7 +629,7 @@ export default class {
               console.info('[Player][retry-unblock] success! source:', d.source, newSrc);
               Howler.unload();
               this._howler = new Howl({
-                src: [newSrc], html5: true, preload: true, format: ['mp3', 'flac'],
+                src: [newSrc], html5: true, preload: true, format: ['mp3'],
                 onend: () => this._nextTrackCallback(),
               });
               this._howler.on('loaderror', () => {
@@ -635,7 +640,7 @@ export default class {
               return;
             }
           } catch (e) {
-            console.warn('[Player][retry-unblock] failed:', e && e.name === 'AbortError' ? '3s timeout' : e);
+            console.warn('[Player][retry-unblock] failed:', e && e.name === 'AbortError' ? '5s timeout' : e);
           }
         }
 
@@ -717,23 +722,60 @@ export default class {
       return getMP3(track.id).then(result => {
         if (!result.data[0]) return null;
         if (!result.data[0].url) return null;
-        if (result.data[0].freeTrialInfo !== null) return null; // 跳过只能试听的歌曲
+        const hasOnlyTrialFragment = result.data[0].freeTrialInfo !== null;
         const source = result.data[0].url.replace(/^http:/, 'https:');
-        if (store.state.settings.automaticallyCacheSongs) {
+        // Mark trial URLs so downstream prefer a full unblock result.
+        // Previously we discarded trial fragments outright, which caused
+        // *zero-audio* → NotSupportedError toast ("不支持的格式") for
+        // every song where Enhanced's gray-unlock returned only a
+        // preview clip (all classic HK/TW oldies like 光辉岁月/一生所爱
+        // when the user is logged out).  A 20-35s preview is strictly
+        // better than "no audio at all" and lets the user understand
+        // that playback *did* happen.  If unblock returns a full URL
+        // later, _getAudioSource() picks it over the trial one.
+        if (hasOnlyTrialFragment) {
+          try {
+            const payload = { url: source, trial: true, br: result.data[0].br || 0 };
+            // Attach a per-track marker in-memory so callers can tell
+            // a trial URL from a licensed one *without* mutating the
+            // string primitive (which would break === comparisons
+            // downstream).  We use Map-backed storage keyed by track id.
+            if (!this._trialUrlMarkers) this._trialUrlMarkers = new Map();
+            this._trialUrlMarkers.set(String(track.id), payload);
+          } catch (_) {}
+        }
+        if (store.state.settings.automaticallyCacheSongs && !hasOnlyTrialFragment) {
           cacheTrackSource(track, source, result.data[0].br);
         }
         return source;
       });
     } else {
       // 未登录：尝试 song/url API 获取可播放链接，无效返回 null 让 unblock 接管
+      // NOTE (2026-08): Even for gray songs the Enhanced backend
+      // (/song/url/v1) often returns a playable 128k MP3 URL via its
+      // own internal gray-unlock.  DO NOT short-circuit for playable
+      // =false here.  Previously we skipped this call entirely for
+      // blocked songs and sent them straight to outer URLs which are
+      // nowadays 100% blocked by Chrome's ORB → NotSupported toast.
       return getMP3(track.id)
         .then(result => {
           if (
             result.data[0] &&
-            result.data[0].url &&
-            result.data[0].freeTrialInfo === null
+            result.data[0].url
           ) {
-            return result.data[0].url.replace(/^http:/, 'https:');
+            const hasOnlyTrialFragment = result.data[0].freeTrialInfo !== null;
+            const source = result.data[0].url.replace(/^http:/, 'https:');
+            if (hasOnlyTrialFragment) {
+              try {
+                if (!this._trialUrlMarkers) this._trialUrlMarkers = new Map();
+                this._trialUrlMarkers.set(String(track.id), {
+                  url: source,
+                  trial: true,
+                  br: result.data[0].br || 0,
+                });
+              } catch (_) {}
+            }
+            return source;
           }
           return null;
         })
@@ -852,28 +894,36 @@ export default class {
     // which *summed* their latencies: cache miss + 2s NCM + 4s unblock
     // = 5-6s wait.  The fix is parallel + upfront prediction).
     // -------------------------------------------------------------------
-    // Strategy:
+    // Strategy (2026-08 REVISED after 光辉岁月 / 一生所爱 debug):
     //  1. Local cache hit → return immediately (unchanged).
-    //  2. Otherwise look at the track's `playable` / `fee` / privilege
-    //     flags that mapTrackPlayableStatus already put on every song in
-    //     the playlist/artist/album response:
-    //       • playable=false (VIP Only / 无版权 / 付费专辑 / 已下架):
-    //         SKIP the Netease /song/url round-trip entirely because the
-    //         upstream will return url=null anyway (the whole reason the
-    //         cutover felt "slow").  Go straight to unblock API.
-    //       • playable=true, but user is logged out or fee>0 unknown:
-    //         run Netease + Unblock in parallel with a short Netease
-    //         deadline (1500ms) so copyright misses don't wait the full
-    //         upstream response before using the unblock result we've
-    //         already been fetching concurrently.
-    //  3. Last-resort fallback: 外链 outer URL (already HTTPS).
+    //  2. **ALWAYS run Netease /song/url in parallel with Unblock**,
+    //     even for playable=false songs.  Why?
+    //       · The backend is the Enhanced fork of NeteaseCloudMusicApi
+    //         whose /song/url endpoint has its OWN built-in gray-unlock
+    //         (proxying to various internal sources & trial previews).
+    //         For many grey oldies (Beyond 光辉岁月, 卢冠廷 一生所爱,
+    //         王菲 红豆 etc.) the Enhanced backend returns a valid 128k
+    //         MP3 URL — but the previous version SKIPPED the NCM call
+    //         entirely for playable=false, sending these songs straight
+    //         to music.163.com/song/media/outer/… which is 100% blocked
+    //         by Chrome's ORB → NotSupportedError "不支持的格式" toast.
+    //       · The "省 1-3s /song/url RTT for grey songs" optimisation
+    //         had the right intent but the wrong scope; the cost of
+    //         *missing* the Enhanced built-in gray URL (total failure)
+    //         far outweighs the benefit of shaving 1-3s.
+    //       · Quality preference still applies — if NCM returns a
+    //         trial-only URL (freeTrialInfo !== null) we PREFER the
+    //         Unblock result because it returns full tracks.  Only if
+    //         Unblock also yields nothing do we fall back to the NCM
+    //         trial fragment, which is still strictly better than zero
+    //         audio + "不支持的格式" toast.
+    //  3. Netease deadline = 1500ms.  If Enhanced doesn't answer fast
+    //     enough we take whichever URL Unblock has first.
+    //  4. Final last-resort fallback: 外链 outer URL.
     // ===================================================================
     return this._getAudioSourceFromCache(String(track.id)).then(cached => {
       if (cached) return cached;
 
-      // ---- Upfront prediction: short-circuit the NCM call when we
-      // already know the song is copyright-blocked.  Removes 1-3s of
-      // dead wait per cut-over for all "gray" songs in the playlist.
       const { playable, reason } = (() => {
         try { return isTrackPlayable(track); }
         catch (_) { return { playable: true, reason: '' }; }
@@ -888,39 +938,53 @@ export default class {
         ? this._getAudioSourceFromUnblockMusic(track)
         : Promise.resolve(null);
 
-      // If Netease won't return a URL, wait only for Unblock (+ last
-      // fallback) and return without paying the /song/url tax.
-      if (definitelyBlocked) {
-        return unblockPromise.then(src => {
-          if (typeof src === 'string' && !src.startsWith('blob:')) src = src.replace(/^http:/, 'https:');
-          return src ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
-        });
-      }
-
-      // ---- Parallel race with quality preference:
-      // Prefer the Netease result (official 320k / flac quality) when
-      // it resolves quickly & yields a URL.  If Netease takes longer
-      // than 1500ms OR returns null (url is empty), use whatever the
-      // Unblock layer already produced.  This turns "5-6s" cutover into
-      // "≤1.5s for gray songs" and "≤ NCM latency for licensed songs"
-      // (typically 300-800ms on a fast link).
+      // ---- ALWAYS run Netease /song/url (Enhanced fork) in parallel.
+      // Its built-in gray-unlock returns MP3 URLs for the very songs
+      // that our own 6-source unblock above fails on.  The only time we
+      // skip NCM is when Electron + explicitly disabled unblock; for
+      // all web builds we pay the ~800ms tax to avoid "不支持的格式".
       const neteasePromise = this._getAudioSourceFromNetease(track);
+      // For definitely-blocked songs, Extended Enhanced gray-unlock
+      // sometimes needs a bit longer than 1.5s because the backend has
+      // to try its own upstream sources; bump the budget to 2500ms
+      // (still snappy) so it has time to return the cached MP3 URL.
+      const ncDeadline = definitelyBlocked ? 2500 : 1500;
       const neteaseWithDeadline = Promise.race([
         neteasePromise,
-        new Promise(resolve => setTimeout(() => resolve('__NCM_TIMEOUT__'), 1500)),
+        new Promise(resolve => setTimeout(() => resolve('__NCM_TIMEOUT__'), ncDeadline)),
       ]);
 
       return Promise.all([neteaseWithDeadline.catch(() => null), unblockPromise.catch(() => null)])
         .then(([nc, ub]) => {
+          // ---- Picking logic with trial-vs-full preference: ----
+          //  1. Unblock ALWAYS wins if it has a URL (it delivers the
+          //     full track, never a trial fragment).
+          //  2. Else if NCM returned a full (non-trial) URL → take it.
+          //  3. Else if NCM returned a TRIAL URL → take it anyway
+          //     (20-35s preview is better than silence / format-error
+          //     toast).  loaderror code=4 path above will also try a
+          //     final unblock round if the browser can't play it.
+          //  4. Else if NCM timed out and Unblock has something → take it.
+          //  5. Fallback: outer URL.
           let pick = null;
-          if (nc !== null && nc !== '__NCM_TIMEOUT__' && typeof nc === 'string' && nc.length) {
-            pick = nc;
-          } else if (typeof ub === 'string' && ub.length) {
+          const ubOK = typeof ub === 'string' && ub.length;
+          const ncOK = nc !== null && nc !== '__NCM_TIMEOUT__' && typeof nc === 'string' && nc.length;
+          const isNcTrial = ncOK && this._trialUrlMarkers && !!this._trialUrlMarkers.get(String(track.id));
+
+          if (ubOK) {
+            // Full third-party source → highest priority
             pick = ub;
-          } else if (nc === '__NCM_TIMEOUT__') {
-            // NCM is still running in background; use unblock or the
-            // outer link now, then let NCM finish silently.
-            if (typeof ub === 'string' && ub.length) pick = ub;
+          } else if (ncOK && !isNcTrial) {
+            pick = nc;
+          } else if (ncOK) {
+            // NCM yielded only a trial fragment.  Still way better
+            // than the outer 404 / NotSupportedError that dominated
+            // before this fix.  cacheNextTrack preloader won't
+            // accidentally cache trial urls because _getAudioSourceFrom
+            // Netease skips caching for trial payloads.
+            pick = nc;
+          } else if (nc === '__NCM_TIMEOUT__' && ubOK) {
+            pick = ub;
           }
           if (typeof pick === 'string' && !pick.startsWith('blob:')) {
             pick = pick.replace(/^http:/, 'https:');
@@ -1133,7 +1197,7 @@ export default class {
               src: [safeUrl],
               html5: true,
               preload: true,
-              format: ['mp3', 'flac'],
+              format: ['mp3'],
             });
             // WeakMap 风格存一下（没有引用也没关系，GC 不影响已经完成的 HTTP disk cache）
             this._preloadHowlers = this._preloadHowlers || [];
@@ -1174,6 +1238,7 @@ export default class {
     //       * _shuffle=true 老值使 list getter 走 _shuffledList（老脏数组）。
     const BLOCKED = new Set([
       '_tracksById',
+      '_trialUrlMarkers',
       '_howler',
       '_preloadHowlers',
       '_playNextList',
@@ -1202,6 +1267,7 @@ export default class {
     }
     // ====== 硬复位为正确的运行时类型（黑名单之后的最后防线） ======
     if (!(this._tracksById instanceof Map)) this._tracksById = new Map();
+    if (!(this._trialUrlMarkers instanceof Map)) this._trialUrlMarkers = new Map();
     if (!Array.isArray(this._playNextList)) this._playNextList = [];
     if (!Array.isArray(this._preloadHowlers)) this._preloadHowlers = [];
     if (!Array.isArray(this.createdBlobRecords)) this.createdBlobRecords = [];
