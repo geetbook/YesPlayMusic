@@ -1054,10 +1054,59 @@ export default class {
     }).catch(() => {});
   }
   _loadSelfFromLocalStorage() {
-    const player = JSON.parse(localStorage.getItem('player'));
-    if (!player) return;
+    let player = null;
+    try {
+      player = JSON.parse(localStorage.getItem('player'));
+    } catch (e) {
+      // localStorage 里的 player 被老版本/坏 JSON 污染（例如存储了 undefined/null 或截断），
+      // 当作没有持久化数据直接跳过，不要 throw。
+      console.warn('[Player] 读取持久化 player 失败，忽略：', e && e.message);
+    }
+    if (!player || typeof player !== 'object') return;
+
+    // ====== 黑名单（绝对不能用 JSON 快照覆盖的 runtime 内部状态）======
+    //   - _tracksById：在构造函数里是 new Map()，但 JSON 序列化 Map 会变成 {}，
+    //     覆盖后 "this._tracksById.get is not a function" → new Player() 直接 throw →
+    //     Vue App 不 mount → 永远白屏。老玩家（更新前访问过）localStorage 里 player
+    //     一定没有 Map，100% 复现此 bug。
+    //   - _howler / _preloadHowlers：Howler 实例不能 JSON 化（带函数/事件监听），
+    //     强制保留 null 让播放流程重新创建。
+    //   - _playNextList：允许存"track 对象"，但老版本 player 可能把它序列化成
+    //     纯 ID 字符串或脏类型，统一 reset 为 [] 避免类型污染。
+    //   - _currentTrack / _personalFMTrack / _personalFMNextTrack：字段不兼容会炸
+    //     _updateMediaSessionMetaData，统一 reset，Vue 初始化会自动拿 _list 对应
+    //     index 的歌曲作为 _currentTrack fallback 恢复。
+    //   - createdBlobRecords：老玩家 localStorage 里可能是 undefined。
+    const BLOCKED = new Set([
+      '_tracksById',
+      '_howler',
+      '_preloadHowlers',
+      '_playNextList',
+      '_personalFMTrack',
+      '_personalFMNextTrack',
+      '_personalFMLoading',
+      '_personalFMNextLoading',
+      '_currentTrack',
+      'createdBlobRecords',
+    ]);
     for (const [key, value] of Object.entries(player)) {
+      if (BLOCKED.has(key)) continue;
       this[key] = value;
+    }
+    // ====== 硬复位为正确的运行时类型（即使黑名单没覆盖也要保底） ======
+    if (!(this._tracksById instanceof Map)) this._tracksById = new Map();
+    if (!Array.isArray(this._playNextList)) this._playNextList = [];
+    if (!Array.isArray(this._preloadHowlers)) this._preloadHowlers = [];
+    if (!Array.isArray(this.createdBlobRecords)) this.createdBlobRecords = [];
+    this._howler = null;
+    if (!this._personalFMTrack || !this._personalFMTrack.id) {
+      this._personalFMTrack = { id: 0 };
+    }
+    if (!this._personalFMNextTrack || !this._personalFMNextTrack.id) {
+      this._personalFMNextTrack = { id: 0 };
+    }
+    if (!this._currentTrack || !this._currentTrack.id) {
+      this._currentTrack = { id: 86827685 };
     }
   }
   _initMediaSession() {
