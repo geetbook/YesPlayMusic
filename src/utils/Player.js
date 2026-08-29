@@ -238,6 +238,17 @@ export default class {
   get currentTrackDuration() {
     const trackDuration = this._currentTrack.dt || 1000;
     let duration = ~~(trackDuration / 1000);
+    // 试听片段：Howler 实际时长 < track.dt 时，用 Howler 时长。
+    // 否则进度条显示完整歌曲时长（如 282s），但试听片段只有 21-35s，
+    // 用户拖到试听范围外会触发 Howler onend → 跳下一首。
+    if (this._howler && this._howler.state() === 'loaded') {
+      try {
+        const howlDur = this._howler.duration();
+        if (howlDur > 0 && howlDur < duration) {
+          duration = Math.floor(howlDur);
+        }
+      } catch (_) {}
+    }
     return duration > 1 ? duration - 1 : duration;
   }
   get progress() {
@@ -245,7 +256,17 @@ export default class {
   }
   set progress(value) {
     if (this._howler) {
-      this._howler.seek(value);
+      // Clamp to Howler actual duration for trial fragments
+      let seekTime = value;
+      try {
+        if (this._howler.state() === 'loaded') {
+          const howlDur = this._howler.duration();
+          if (howlDur > 0 && seekTime >= howlDur) {
+            seekTime = Math.max(0, howlDur - 0.5);
+          }
+        }
+      } catch (_) {}
+      this._howler.seek(seekTime);
       if (isCreateMpris) {
         ipcRenderer?.send('seeked', this._howler.seek());
       }
@@ -1790,7 +1811,19 @@ export default class {
       ipcRenderer?.send('seeked', time);
     }
     if (time !== null) {
-      this._howler?.seek(time);
+      // Clamp to Howler actual duration for trial fragments
+      // 试听片段只有 21-35s，但 track.dt 是完整歌曲时长。
+      // seek 超出试听范围会触发 Howler onend → 跳下一首。
+      let seekTime = time;
+      if (this._howler && this._howler.state() === 'loaded') {
+        try {
+          const howlDur = this._howler.duration();
+          if (howlDur > 0 && seekTime >= howlDur) {
+            seekTime = Math.max(0, howlDur - 0.5);
+          }
+        } catch (_) {}
+      }
+      this._howler?.seek(seekTime);
       if (this._playing)
         this._playDiscordPresence(this._currentTrack, this.seek(null, false));
       // Sync to Tesla car audio element
