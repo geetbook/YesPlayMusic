@@ -520,6 +520,11 @@ export default class {
       onend: () => {
         this._nextTrackCallback();
       },
+      onplay: () => {
+        // Successful playback → reset the consecutive-fail counter so
+        // the toast-throttle logic applies to truly dead playlists only.
+        this._consecutiveLoadFails = 0;
+      },
     });
     // Sync source to Tesla car's visible audio element
     if (typeof window !== 'undefined' && window.__playerSyncTesla) {
@@ -595,7 +600,21 @@ export default class {
         } else if (finalFallbackTried) {
           reason = '受版权保护，所有第三方音源均未匹配';
         }
-        store.dispatch('showToast', `无法播放：${reason}`);
+        // ---- Consecutive-fail UX: avoid spamming toast one song at a time.
+        // When 3+ consecutive copyright-style failures happen, switch to a
+        // single aggregated "try another playlist" toast + faster auto-skip.
+        this._consecutiveLoadFails = (this._consecutiveLoadFails || 0) + 1;
+        const n = this._consecutiveLoadFails;
+        if (n >= 3) {
+          // Every 3rd failed song, show ONE "版权密集" toast.  Don't toast
+          // on every single failure — Tesla drivers shouldn't re-read the
+          // same message every 800ms.
+          if (n % 3 === 0) {
+            store.dispatch('showToast', `连续 ${n} 首无法播放（受版权保护），建议切换歌单或搜索其他歌曲`);
+          }
+        } else {
+          store.dispatch('showToast', `无法播放：${reason}`);
+        }
         this._playNextTrack(this._isPersonalFM);
         return;
       }
