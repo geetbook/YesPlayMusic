@@ -1176,26 +1176,32 @@ export default class {
     if ('mediaSession' in navigator === false) {
       return;
     }
-    let artists = track.ar.map(a => a.name);
+    if (!track) return;
+    const ar = Array.isArray(track.ar) ? track.ar : [];
+    const al = track.al && typeof track.al === 'object' ? track.al : { name: '', picUrl: '' };
+    let artists = ar.length ? ar.map(function(a){ return a && a.name ? a.name : ''; }) : ['未知歌手'];
+    const picUrl = al.picUrl || '';
     const metadata = {
-      title: track.name,
+      title: track.name || '未知歌曲',
       artist: artists.join(','),
-      album: track.al.name,
-      artwork: [
-        {
-          src: track.al.picUrl + '?param=224y224',
-          type: 'image/jpg',
-          sizes: '224x224',
-        },
-        {
-          src: track.al.picUrl + '?param=512y512',
-          type: 'image/jpg',
-          sizes: '512x512',
-        },
-      ],
+      album: al.name || '未知专辑',
+      artwork: picUrl
+        ? [
+            {
+              src: picUrl + '?param=224y224',
+              type: 'image/jpg',
+              sizes: '224x224',
+            },
+            {
+              src: picUrl + '?param=512y512',
+              type: 'image/jpg',
+              sizes: '512x512',
+            },
+          ]
+        : undefined,
       length: this.currentTrackDuration,
       trackId: this.current,
-      url: '/trackid/' + track.id,
+      url: '/trackid/' + (track.id || ''),
     };
 
     navigator.mediaSession.metadata = new window.MediaMetadata(metadata);
