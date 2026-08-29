@@ -496,6 +496,22 @@ export default class {
   }
   _playAudioSource(source, autoplay = true) {
     Howler.unload();
+
+    // ============================================================
+    // TESLA / HTTPS safety — force all audio sources to be HTTPS.
+    // ------------------------------------------------------------
+    // Tesla car browsers (and Chrome) silently block HTTP audio
+    // URLs loaded from an HTTPS page (Mixed Content Blocker).  The
+    // only symptom is Howler's `loaderror` code 4 ("src not
+    // supported") which looks exactly like a codec/format failure.
+    // Normalise once here so downstream code paths can't bypass.
+    // ============================================================
+    if (typeof source === 'string' && !source.startsWith('blob:')) {
+      source = source.replace(/^http:/, 'https:');
+    }
+
+    console.debug('[Player][playSource]', source);
+
     this._howler = new Howl({
       src: [source],
       html5: true,
@@ -509,21 +525,30 @@ export default class {
     if (typeof window !== 'undefined' && window.__playerSyncTesla) {
       window.__playerSyncTesla();
     }
-    this._howler.on('loaderror', (_, errCode) => {
+    this._howler.on('loaderror', (howlerId, errCode) => {
       // https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
       // code 3: MEDIA_ERR_DECODE
+      // code 4: MEDIA_ERR_SRC_NOT_SUPPORTED  (mixed content / 403 / wrong content-type / null url)
+      console.warn('[Player][loaderror] code=', errCode, 'src=', this._howler?.src);
       if (errCode === 3) {
+        store.dispatch('showToast', `无法播放 ${this.currentTrack?.name || ''}：解码失败`);
         this._playNextTrack(this._isPersonalFM);
       } else if (errCode === 4) {
-        // code 4: MEDIA_ERR_SRC_NOT_SUPPORTED
-        store.dispatch('showToast', `无法播放: 不支持的音频格式`);
+        // For code 4, differentiate the most common reasons with a
+        // descriptive toast so the user can understand vs a generic
+        // "unsupported format".
+        const srcUrl = String(source || '');
+        let reason = '受版权保护的歌曲，已尝试全部音源';
+        if (srcUrl.length < 10)                          reason = '未获取到音频地址';
+        else if (srcUrl.startsWith('http://'))            reason = 'HTTP 资源被浏览器拦截（混合内容）';
+        else if (srcUrl.includes('music.163.com/outer'))  reason = '网易云外链不可用（需登录账号）';
+        else if (srcUrl.includes('kugou') || srcUrl.includes('qq.com')) reason = '第三方音源链接失效';
+        store.dispatch('showToast', `无法播放：${reason}`);
         this._playNextTrack(this._isPersonalFM);
       } else {
         const t = this.progress;
         this._replaceCurrentTrackAudio(this.currentTrack, false, false).then(
           replaced => {
-            // 如果 replaced 为 false，代表当前的 track 已经不是这里想要替换的track
-            // 此时则不修改当前的歌曲进度
             if (replaced) {
               this._howler?.seek(t);
               this.play();
@@ -615,10 +640,14 @@ export default class {
         const resp = await fetch(`/api/unblock?${params.toString()}`);
         const data = await resp.json();
         if (data && data.url) {
+          // ✅ CRITICAL: All audio sources served over HTTPS page must be
+          // HTTPS URLs — otherwise Chrome/Tesla block it as Mixed Content
+          // and Howler hits onerror code 4 ("src not supported").
+          const url = String(data.url).replace(/^http:/, 'https:');
           if (store.state.settings.automaticallyCacheSongs) {
-            cacheTrackSource(track, data.url, 128000, `unm:${data.source}`);
+            cacheTrackSource(track, url, 128000, `unm:${data.source}`);
           }
-          return data.url;
+          return url;
         }
         return null;
       } catch (err) {
@@ -694,8 +723,20 @@ export default class {
         return source ?? this._getAudioSourceFromUnblockMusic(track);
       })
       .then(source => {
-        // 最后 fallback：网易云外链接口
-        return source ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
+        if (source) {
+          // One last defensive HTTPS conversion — every upstream (Netease,
+          // unblock 酷狗/QQ/酷我/咪咕, cache Blob URLs) can occasionally
+          // return an HTTP URL, which gets silently blocked as Mixed Content
+          // on our HTTPS page, resulting in MEDIA_ERR_SRC_NOT_SUPPORTED.
+          // Blob URLs (blob:https://...) are already origin-bound so we leave
+          // them alone.
+          if (typeof source === 'string' && !source.startsWith('blob:')) {
+            source = source.replace(/^http:/, 'https:');
+          }
+          return source;
+        }
+        // 最后 fallback：网易云外链接口（already HTTPS）
+        return `https://music.163.com/song/media/outer/url?id=${track.id}`;
       });
   }
   _replaceCurrentTrack(
