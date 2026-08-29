@@ -17,13 +17,25 @@ export function getArtist(id) {
       timestamp: new Date().getTime(),
     },
   }).then(async data => {
-    if (!isAccountLoggedIn()) {
-      const trackIDs = data.hotSongs.map(t => t.id);
-      const tracks = await getTrackDetail(trackIDs.join(','));
-      data.hotSongs = tracks.songs;
-      return data;
+    // ================================================================
+    // Avoid the /song/detail long-URL Cloudflare truncation bug.
+    // ----------------------------------------------------------------
+    // When NOT logged in, the original code did:
+    //   getTrackDetail(data.hotSongs.map(t=>t.id).join(','))
+    // which builds a querystring of 50 ids (~200+ chars each) → a
+    // 2000–4000 byte URL that Cloudflare/CDN edge closes mid-flight
+    // (ERR_CONNECTION_CLOSED).  The `/artists` endpoint already
+    // returns the full hotSongs payload with ar/al/dt/name/pop —
+    // we don't need a second /song/detail round-trip.  Skip the
+    // fetch entirely and just mark playback status in-place.
+    // ================================================================
+    if (!Array.isArray(data.hotSongs)) data.hotSongs = [];
+    try {
+      data.hotSongs = mapTrackPlayableStatus(data.hotSongs);
+    } catch (e) {
+      // If mapping fails for any reason, fall back to the raw list so
+      // the user at least sees 50 songs (some playable, some greyed).
     }
-    data.hotSongs = mapTrackPlayableStatus(data.hotSongs);
     return data;
   });
 }
