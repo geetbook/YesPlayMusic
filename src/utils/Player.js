@@ -36,10 +36,50 @@ const delay = ms =>
       resolve('');
     }, ms);
   });
+/**
+ * localStorge.player 持久化时要排除的 key。
+ * 【必须与 _loadSelfFromLocalStorage 内部的 BLOCKED Set 严格对齐】
+ *   因为 saveSelfToLocalStorage 会用 `for (const [k,v] of Object.entries(this))`
+ *   枚举 Player 单例 own enumerable keys：只要下面漏了一个 runtime-only 字段（Howler /
+ *   Map / Set / 循环引用对象 / 本轮新增的 _tracksById, _preloadHowlers…），就会在
+ *   JSON.stringify 时 throw "Converting circular structure to JSON"（Howler Howl ↔
+ *   Sound._parent 互相引用），而 saveSelfToLocalStorage 会被 Vue watcher / setter
+ *   在 playing/current/currentTrack 变化时同步调用 → throw 会直接打断 Vue 响应式链
+ *   路 → **用户体感：点 ⏭ 下一曲后，音频其实切了，但进度条/歌名/mini-player 完全不
+ *   更新 → 觉得"按下一曲没有反应"**。这就是 2026-08-29 报告的根因。
+ *   同时 save 的内容如果是脏的（老 Howler null / Map→{} / 布尔 / 索引 / 数字），下次
+ *   reload 时又会污染新 Player，形成 save → load → save → ... 的脏循环。
+ */
 const excludeSaveKeys = [
-  '_playing',
+  // —— Howler / 音频实例 / 缓存 ——
+  '_howler',              // Howl 实例（non-enumerable 已 defineProperty，但为未来保险显式列）
+  '_preloadHowlers',      // [{howl:Howl, forTrackId, at}]，Howl 100% circular
+  '_progress',            // 当前播放秒数，下次 reload 从 localStorage playerCurrentTrackTime 恢复
+  '_duration',            // 歌曲时长（Howler 或 dt 派生，重新计算即可）
+  // —— Map / 纯 runtime 索引缓存 ——
+  '_tracksById',          // new Map()，JSON 无法往返
+  'createdBlobRecords',   // Blob URL revoke 表，reload 后全部失效
+  // —— 索引 / 播放位置（脏值会让 replacePlaylist autoPlayTrackID 变成越界 ID）——
+  '_current',
+  '_shuffledCurrent',
+  '_list',
+  '_shuffledList',
+  // —— track / 歌曲对象快照 ——
+  '_currentTrack',        // 会随 reload 重新从 list[index] 或 FAST PATH 恢复
+  '_personalFMTrack',
+  '_personalFMNextTrack',
+  '_personalFMTrackIDs',
+  '_personalFMCurrentIndex',
+  // —— 布尔开关（不要让老 JSON 里 shuffle=true / enabled=false 等在 reload 时错乱新页面）——
+  '_shuffle',
+  '_enabled',
+  '_isPersonalFM',
   '_personalFMLoading',
   '_personalFMNextLoading',
+  '_playing',
+  // —— 其他 runtime-only state ——
+  '_playlistSource',
+  '_playNextList',
 ];
 
 function setTitle(track) {
@@ -1542,13 +1582,50 @@ export default class {
     return true;
   }
   saveSelfToLocalStorage() {
-    let player = {};
-    for (let [key, value] of Object.entries(this)) {
-      if (excludeSaveKeys.includes(key)) continue;
+    const excluded = new Set(excludeSaveKeys);
+    const player = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (excluded.has(key)) continue;
+      // 二次安全门：即使 excludeSaveKeys 漏了字段，也绝不把下列 runtime-only 类型写入
+      // JSON（Map/Howler/Blob/RegExp/Function 或 circular 对象）。
+      const vType = typeof value;
+      if (value === null || value === undefined) {
+        player[key] = value;
+        continue;
+      }
+      if (vType === 'function') continue;
+      if (value instanceof Map) continue;
+      if (value instanceof WeakMap) continue;
+      if (value instanceof Set) continue;
+      if (value instanceof WeakSet) continue;
+      if (value instanceof RegExp) continue;
+      if (value instanceof Blob) continue;
+      if (value instanceof HTMLElement) continue;
+      if (vType === 'object' && value.constructor && value.constructor.name !== 'Object' && value.constructor.name !== 'Array') {
+        // 自定义类实例（Howler、Vue 组件、任何带循环引用的类）一律跳过，
+        // 这些对象 JSON.stringify 99% 会 circular → throw → 打断 Vue setter 链路。
+        continue;
+      }
       player[key] = value;
     }
 
-    localStorage.setItem('player', JSON.stringify(player));
+    try {
+      // === 第三重安全门：自定义 replacer，检测 circular ref 主动返回 undefined 跳过，
+      //     绝对不允许 JSON.stringify throw（这是用户体感"下一曲没反应"的最后防火墙）。
+      const seen = new WeakSet();
+      const json = JSON.stringify(player, function replacer(key, value) {
+        if (value !== null && typeof value === 'object') {
+          if (seen.has(value)) return undefined;
+          seen.add(value);
+        }
+        return value;
+      });
+      localStorage.setItem('player', json);
+    } catch (e) {
+      // 第 4 重：无论如何（字符串长度超 quota 5MB / quota exceeded / 编码问题）
+      // 吞掉所有错误。用户不需要知道 save player 失败；更重要的是不能 throw 打断响应式。
+      console.warn('[Player] 持久化 player 失败（已忽略）：', e && e.message);
+    }
   }
 
   pause() {
