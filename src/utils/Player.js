@@ -238,13 +238,13 @@ export default class {
   get currentTrackDuration() {
     const trackDuration = this._currentTrack.dt || 1000;
     let duration = ~~(trackDuration / 1000);
-    // 试听片段：Howler 实际时长 < track.dt 时，用 Howler 时长。
-    // 否则进度条显示完整歌曲时长（如 282s），但试听片段只有 21-35s，
-    // 用户拖到试听范围外会触发 Howler onend → 跳下一首。
+    // 用 Howler 实际时长替代 track.dt。试听片段只有 21-35s 但 track.dt
+    // 报完整歌曲时长（200-300s），kugou 完整曲可能比原版长/短。
+    // 统一用 Howler 时长让进度条与实际音频一致，拖动不跳下一首。
     if (this._howler && this._howler.state() === 'loaded') {
       try {
         const howlDur = this._howler.duration();
-        if (howlDur > 0 && howlDur < duration) {
+        if (howlDur > 1 && Number.isFinite(howlDur)) {
           duration = Math.floor(howlDur);
         }
       } catch (_) {}
