@@ -525,37 +525,88 @@ export default class {
     if (typeof window !== 'undefined' && window.__playerSyncTesla) {
       window.__playerSyncTesla();
     }
-    this._howler.on('loaderror', (howlerId, errCode) => {
+    this._howler.on('loaderror', async (howlerId, errCode) => {
       // https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
       // code 3: MEDIA_ERR_DECODE
-      // code 4: MEDIA_ERR_SRC_NOT_SUPPORTED  (mixed content / 403 / wrong content-type / null url)
-      console.warn('[Player][loaderror] code=', errCode, 'src=', this._howler?.src);
+      // code 4: MEDIA_ERR_SRC_NOT_SUPPORTED  (mixed content / 403 / wrong content-type / null url / copyright block -> 302 html)
+      console.warn('[Player][loaderror] code=', errCode, 'src=', source);
       if (errCode === 3) {
-        store.dispatch('showToast', `无法播放 ${this.currentTrack?.name || ''}：解码失败`);
+        store.dispatch('showToast', `无法播放 ${this.currentTrack?.name || ''}：解码失败，自动下一首`);
         this._playNextTrack(this._isPersonalFM);
-      } else if (errCode === 4) {
-        // For code 4, differentiate the most common reasons with a
-        // descriptive toast so the user can understand vs a generic
-        // "unsupported format".
+        return;
+      }
+      if (errCode === 4) {
         const srcUrl = String(source || '');
+        // ------- Last-ditch retry: DIRECT unblock API call -------
+        // Some cached page-loads set enableUnblockNeteaseMusic=false in
+        // localStorage even though the user actually wants it on.  We
+        // bypass store.state.settings completely and hit the real
+        // /api/unblock serverless endpoint once as a final attempt
+        // specifically for "copyright block / all sources exhausted"
+        // class of failures (the default reason below).
+        const looksCopyrightBlock =
+          srcUrl.length >= 10 &&
+          !srcUrl.startsWith('http://') &&
+          !srcUrl.includes('music.163.com/outer') &&
+          !srcUrl.includes('kugou') &&
+          !srcUrl.includes('qq.com') &&
+          !srcUrl.includes('kuwo') &&
+          !srcUrl.includes('migu');
+        let finalFallbackTried = false;
+        if (looksCopyrightBlock && this.currentTrack) {
+          const tr = this.currentTrack;
+          try {
+            const artist = (tr.ar || tr.artists || []).map(a => a.name).join(' ');
+            const q = new URLSearchParams({ id: String(tr.id), name: tr.name, artist });
+            finalFallbackTried = true;
+            const r = await fetch(`/api/unblock?${q.toString()}`);
+            const d = await r.json();
+            if (d && d.url) {
+              const newSrc = String(d.url).replace(/^http:/, 'https:');
+              console.info('[Player][retry-unblock] success! source:', d.source, newSrc);
+              Howler.unload();
+              this._howler = new Howl({
+                src: [newSrc], html5: true, preload: true, format: ['mp3', 'flac'],
+                onend: () => this._nextTrackCallback(),
+              });
+              this._howler.on('loaderror', () => {
+                store.dispatch('showToast', '无法播放：第三方音源返回的链接也失效，自动下一首');
+                this._playNextTrack(this._isPersonalFM);
+              });
+              this.play();
+              return;
+            }
+          } catch (e) {
+            console.warn('[Player][retry-unblock] failed:', e);
+          }
+        }
+
+        // Differentiate the reason so the user understands what's happening.
         let reason = '受版权保护的歌曲，已尝试全部音源';
-        if (srcUrl.length < 10)                          reason = '未获取到音频地址';
-        else if (srcUrl.startsWith('http://'))            reason = 'HTTP 资源被浏览器拦截（混合内容）';
-        else if (srcUrl.includes('music.163.com/outer'))  reason = '网易云外链不可用（需登录账号）';
-        else if (srcUrl.includes('kugou') || srcUrl.includes('qq.com')) reason = '第三方音源链接失效';
+        if (srcUrl.length < 10) {
+          reason = '未获取到音频地址（接口返回为空）';
+        } else if (srcUrl.startsWith('http://')) {
+          reason = 'HTTP 链接被浏览器拦截（混合内容）';
+        } else if (srcUrl.includes('music.163.com/outer')) {
+          reason = '网易云外链不可用（请先登录网易云账号）';
+        } else if (srcUrl.includes('kugou') || srcUrl.includes('qq.com') ||
+                   srcUrl.includes('kuwo') || srcUrl.includes('migu')) {
+          reason = '第三方音源链接失效';
+        } else if (finalFallbackTried) {
+          reason = '受版权保护，所有第三方音源均未匹配';
+        }
         store.dispatch('showToast', `无法播放：${reason}`);
         this._playNextTrack(this._isPersonalFM);
-      } else {
-        const t = this.progress;
-        this._replaceCurrentTrackAudio(this.currentTrack, false, false).then(
-          replaced => {
-            if (replaced) {
-              this._howler?.seek(t);
-              this.play();
-            }
-          }
-        );
+        return;
       }
+      // codes 1 (aborted) / 2 (network) / etc.
+      const t = this.progress;
+      this._replaceCurrentTrackAudio(this.currentTrack, false, false).then(replaced => {
+        if (replaced) {
+          this._howler?.seek(t);
+          this.play();
+        }
+      });
     });
     if (autoplay) {
       this.play();
