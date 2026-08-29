@@ -944,11 +944,12 @@ export default class {
       // skip NCM is when Electron + explicitly disabled unblock; for
       // all web builds we pay the ~800ms tax to avoid "不支持的格式".
       const neteasePromise = this._getAudioSourceFromNetease(track);
-      // For definitely-blocked songs, Extended Enhanced gray-unlock
-      // sometimes needs a bit longer than 1.5s because the backend has
-      // to try its own upstream sources; bump the budget to 2500ms
-      // (still snappy) so it has time to return the cached MP3 URL.
-      const ncDeadline = definitelyBlocked ? 2500 : 1500;
+      // For definitely-blocked songs, Enhanced's gray-unlock often has
+      // to contact its own upstream sources; the previous 2500ms budget
+      // was too tight and real-world Beyond/卢冠廷 songs took ~2900ms.
+      // 5000ms still gives a snappy UX and avoids the fake-then-abort
+      // outer-URL fallback that ORB-kills → NotSupportedError toast.
+      const ncDeadline = definitelyBlocked ? 5000 : 1500;
       const neteaseWithDeadline = Promise.race([
         neteasePromise,
         new Promise(resolve => setTimeout(() => resolve('__NCM_TIMEOUT__'), ncDeadline)),
@@ -964,7 +965,12 @@ export default class {
           //     (20-35s preview is better than silence / format-error
           //     toast).  loaderror code=4 path above will also try a
           //     final unblock round if the browser can't play it.
-          //  4. Else if NCM timed out and Unblock has something → take it.
+          //  4. Else if NCM timed out → BUT _trialUrlMarkers may already
+          //     have a result (Promise.race returned __NCM_TIMEOUT__
+          //     before _getAudioSourceFromNetease actually resolved,
+          //     but neteasePromise kept running in the background and
+          //     wrote the marker on completion).  Check the marker
+          //     first, only fall back to Unblock/outer if truly empty.
           //  5. Fallback: outer URL.
           let pick = null;
           const ubOK = typeof ub === 'string' && ub.length;
@@ -983,8 +989,40 @@ export default class {
             // accidentally cache trial urls because _getAudioSourceFrom
             // Netease skips caching for trial payloads.
             pick = nc;
-          } else if (nc === '__NCM_TIMEOUT__' && ubOK) {
-            pick = ub;
+          } else if (nc === '__NCM_TIMEOUT__') {
+            // --- Timeout-recovery: neteasePromise might still be
+            // running OR might have already resolved and written the
+            // trial marker after the race deadline fired. ---
+            const marker = this._trialUrlMarkers && this._trialUrlMarkers.get(String(track.id));
+            if (marker && marker.url && /^https?:\/\//i.test(String(marker.url))) {
+              pick = String(marker.url);
+            } else if (ubOK) {
+              pick = ub;
+            } else {
+              // Last little push: if neteasePromise is *still* pending
+              // (nothing in marker), wait *just a bit longer* (up to
+              // 1500ms more) because we know the old budget was tight
+              // and the song *just* needed ~300ms extra.  Return a
+              // chained promise rather than the static string so the
+              // caller still gets the URL in its async resolution.
+              return Promise.race([
+                neteasePromise.catch(() => null),
+                new Promise(resolve => setTimeout(() => resolve('__NCM_TIMEOUT2__'), 1500)),
+              ]).then(lateNc => {
+                let latePick = null;
+                const lateOK = lateNc !== null && lateNc !== '__NCM_TIMEOUT2__'
+                  && typeof lateNc === 'string' && lateNc.length;
+                const lateMarker = this._trialUrlMarkers
+                  && this._trialUrlMarkers.get(String(track.id));
+                if (ubOK) latePick = ub;
+                else if (lateOK) latePick = lateNc;
+                else if (lateMarker && lateMarker.url) latePick = String(lateMarker.url);
+                if (typeof latePick === 'string' && !latePick.startsWith('blob:')) {
+                  latePick = latePick.replace(/^http:/, 'https:');
+                }
+                return latePick ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
+              });
+            }
           }
           if (typeof pick === 'string' && !pick.startsWith('blob:')) {
             pick = pick.replace(/^http:/, 'https:');
