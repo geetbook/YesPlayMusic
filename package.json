@@ -123,8 +123,12 @@
     "rules": {}
   },
   "browserslist": [
-    "> 1%",
-    "last 2 versions",
+    "Chrome >= 60",
+    "Safari >= 12",
+    "iOS >= 12",
+    "Firefox >= 68",
+    "Edge >= 18",
+    "Android >= 67",
     "not dead"
   ],
   "husky": {
