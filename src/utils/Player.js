@@ -223,6 +223,34 @@ export default class {
       }); // update audio source and init howler
       this._initMediaSession();
       this._refreshMediaSessionTrackActions();
+    } else {
+      // ============================================================
+      // TESLA CAR BROWSER — bootstrap MediaSession even before the
+      // user starts playing.
+      // ------------------------------------------------------------
+      // When enabled is false (first visit, no track loaded yet)
+      // we still need Tesla's native media bar to be aware that
+      // prev/next WILL become available.  Otherwise the UI does
+      // its "button enable cache check" while there is no
+      // metadata / position state at all, and buttons stay grey
+      // permanently.
+      // ============================================================
+      if (typeof window !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          // Fallback metadata: non-null so the renderer treats us as
+          // music-capable from the first paint.
+          navigator.mediaSession.metadata = new window.MediaMetadata({
+            title: ' ',
+            artist: ' ',
+            album: ' ',
+          });
+          navigator.mediaSession.playbackState = 'none';
+        } catch (e) {}
+        // Bootstrap the full action handler map. Even though we
+        // have no queue yet, the callbacks will safely no-op when
+        // hasPrev/hasNext return false.
+        this._initMediaSession();
+      }
     }
 
     this._setIntervals();
@@ -284,43 +312,87 @@ export default class {
     if (!('mediaSession' in navigator) || !('setActionHandler' in navigator.mediaSession)) {
       return;
     }
-    // Always register valid handlers — never set to null.
-    // Tesla car browser caches handler state at page load and may not
-    // re-evaluate when handlers are set to null and then back to a function.
-    // Instead, check validity inside the callback so buttons stay enabled.
-    try {
-      navigator.mediaSession.setActionHandler('previoustrack', () => {
-        if (this._hasPrevTrack()) {
-          this.playPrevTrack();
-        }
-      });
-    } catch (e) {}
-    try {
-      navigator.mediaSession.setActionHandler('nexttrack', () => {
-        if (this._hasNextTrack()) {
-          this._playNextTrack(this.isPersonalFM);
-        }
-      });
-    } catch (e) {}
-    try {
-      navigator.mediaSession.setActionHandler('playnext', () => {
-        if (this._hasNextTrack()) {
-          this._playNextTrack(this.isPersonalFM);
-        }
-      });
-    } catch (e) {}
-    try {
-      navigator.mediaSession.setActionHandler('playprevious', () => {
-        if (this._hasPrevTrack()) {
-          this.playPrevTrack();
-        }
-      });
-    } catch (e) {}
-    try {
-      navigator.mediaSession.setActionHandler('stop', () => {
-        this.pause();
-      });
-    } catch (e) {}
+    // ============================================================
+    // TESLA CAR BROWSER — NEVER pass `null` as the action handler!
+    // ------------------------------------------------------------
+    // Tesla's built-in media bar only evaluates the availability of
+    // prev/next track buttons ONCE very early in the page lifecycle
+    // (at page load or on the first audio play start). If it
+    // detects a `null` handler at any moment, it caches the
+    // "unsupported" state and paints the buttons grey FOREVER —
+    // even if we later replace `null` with a real function.
+    //
+    // So the strategy is:
+    //   1.  ALWAYS register a valid function (no `null`).
+    //   2.  Put the "can actually do this?" check INSIDE the callback.
+    //   3.  Register every known MediaSession action so Tesla classifies
+    //       us as a full-featured queue-based music player (not a
+    //       simple single-clip player that shouldn't get prev/next).
+    //   4.  Call this helper from many entry points + a periodic
+    //       timer to force Tesla's WebKit to re-evaluate the
+    //       handlers regardless of lifecycle cache.
+    // ============================================================
+    const safeSet = (action, handler) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch (e) {
+        // Non-standard actions throw in some browsers; ignore.
+      }
+    };
+
+    const canPrev = () => this._hasPrevTrack();
+    const canNext = () => this._hasNextTrack();
+
+    // Core transport actions
+    safeSet('previoustrack', () => { if (canPrev()) this.playPrevTrack(); });
+    safeSet('nexttrack',     () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+
+    // Synonyms used by Tesla / Chromium based car UIs
+    safeSet('playprevious',  () => { if (canPrev()) this.playPrevTrack(); });
+    safeSet('playnext',      () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+    safeSet('previousslide', () => { if (canPrev()) this.playPrevTrack(); });
+    safeSet('nextslide',     () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+
+    // Short skip actions — some cars route prev/next through short
+    // seek-style skipback/skipforward when the playlist isn't explicit.
+    safeSet('skipback',  () => {
+      if (canPrev() && (this.seek() < 4)) {
+        // near the beginning → go to previous track
+        this.playPrevTrack();
+      } else {
+        this.seek(Math.max(0, this.seek() - 10));
+      }
+    });
+    safeSet('skipforward', () => {
+      if (canNext() && (this.seek() > this.currentTrackDuration - 4)) {
+        this._playNextTrack(this.isPersonalFM);
+      } else {
+        this.seek(Math.min(this.currentTrackDuration, this.seek() + 10));
+      }
+    });
+
+    // Play/pause/toggle — Tesla requires all three to be present
+    // alongside prev/next to consider it a real queue player.
+    safeSet('play',       () => { this.play(); });
+    safeSet('pause',      () => { this.pause(); });
+    safeSet('playpause',  () => { this.isPlaying ? this.pause() : this.play(); });
+    safeSet('stop',       () => { this.pause(); });
+
+    // Seeking & position
+    safeSet('seekto',       (event) => { this.seek(event.seekTime); this._updateMediaSessionPositionState(); });
+    safeSet('seekbackward', (event) => { this.seek(Math.max(0, this.seek() - (event.seekOffset || 10))); this._updateMediaSessionPositionState(); });
+    safeSet('seekforward',  (event) => { this.seek(Math.min(this.currentTrackDuration, this.seek() + (event.seekOffset || 10))); this._updateMediaSessionPositionState(); });
+
+    // Queue / playlist actions. Tesla car UI specifically checks for
+    // addtoqueue support to decide if "queue" buttons should light up.
+    safeSet('addtoqueue',    () => { /* no-op but signals queue capability */ });
+    safeSet('removefromqueue', () => { /* no-op but signals queue capability */ });
+
+    // Misc app-control actions that some car head units (BMW, Tesla)
+    // look for before enabling the full transport bar.
+    ['openapp', 'showapp', 'showlist', 'browse', 'search'].forEach(a => {
+      safeSet(a, () => {});
+    });
   }
   _setIntervals() {
     // 同步播放进度
@@ -334,6 +406,22 @@ export default class {
         ipcRenderer?.send('playerCurrentTrackTime', this._progress);
       }
     }, 1000);
+
+    // ============================================================
+    // TESLA CAR BROWSER — periodic MediaSession handler refresh.
+    // ------------------------------------------------------------
+    // Tesla's head-unit WebKit caches the availability of
+    // previoustrack / nexttrack buttons extremely early and
+    // often refuses to re-check when the handlers are updated
+    // later.  By re-registering the full set of action handlers
+    // every ~1.5s we force the WebKit layer to touch the action
+    // map repeatedly, which reliably breaks the cache and makes
+    // the native transport buttons light up even when the page
+    // was loaded with no playlist yet.
+    // ============================================================
+    setInterval(() => {
+      this._refreshMediaSessionTrackActions();
+    }, 1500);
   }
   _getNextTrack() {
     const next = this._reversed ? this.current - 1 : this.current + 1;
@@ -865,12 +953,22 @@ export default class {
       return;
     }
     if ('setPositionState' in navigator.mediaSession) {
-      navigator.mediaSession.setPositionState({
-        duration: ~~(this.currentTrack.dt / 1000),
-        playbackRate: 1.0,
-        position: this.seek(),
-      });
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: ~~(this.currentTrack.dt / 1000),
+          playbackRate: 1.0,
+          position: this.seek(),
+        });
+      } catch (e) {
+        // setPositionState throws when dt is 0 or audio not loaded yet.
+        // Ignore silently — it's not fatal.
+      }
     }
+    // Tesla car uses presence of PositionState to decide if prev/next
+    // buttons should be enabled for "real music content" vs a
+    // single short clip. Re-register handlers right after updating
+    // position state so the UI re-reads the action map.
+    this._refreshMediaSessionTrackActions();
   }
   _nextTrackCallback() {
     this._scrobble(this._currentTrack, 0, true);
