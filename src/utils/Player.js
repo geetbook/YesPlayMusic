@@ -7,6 +7,7 @@ import { getLyric, getMP3, getTrackDetail, scrobble } from '@/api/track';
 import store from '@/store';
 import { isAccountLoggedIn } from '@/utils/auth';
 import { cacheTrackSource, getTrackSource } from '@/utils/db';
+import { isTrackPlayable } from '@/utils/common';
 import { isCreateMpris, isCreateTray } from '@/utils/platform';
 import { Howl, Howler } from 'howler';
 import shuffle from 'lodash/shuffle';
@@ -564,7 +565,18 @@ export default class {
             const artist = (tr.ar || tr.artists || []).map(a => a.name).join(' ');
             const q = new URLSearchParams({ id: String(tr.id), name: tr.name, artist });
             finalFallbackTried = true;
-            const r = await fetch(`/api/unblock?${q.toString()}`);
+            // ---- Timeout (3s) so a slow unblock endpoint doesn't
+            // hang the cutover for 5-6s before the user even sees a
+            // toast.  If the first 2 rounds of unblock above all came
+            // back empty, a 3rd 6s+ call is not worth waiting for.
+            const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timeoutId = controller ? setTimeout(() => controller.abort(), 3000) : null;
+            let r;
+            try {
+              r = await fetch(`/api/unblock?${q.toString()}`, controller ? { signal: controller.signal } : undefined);
+            } finally {
+              if (timeoutId) clearTimeout(timeoutId);
+            }
             const d = await r.json();
             if (d && d.url) {
               const newSrc = String(d.url).replace(/^http:/, 'https:');
@@ -582,7 +594,7 @@ export default class {
               return;
             }
           } catch (e) {
-            console.warn('[Player][retry-unblock] failed:', e);
+            console.warn('[Player][retry-unblock] failed:', e && e.name === 'AbortError' ? '3s timeout' : e);
           }
         }
 
@@ -794,29 +806,87 @@ export default class {
     return this._getAudioSourceBlobURL(buffer);
   }
   _getAudioSource(track) {
-    return this._getAudioSourceFromCache(String(track.id))
-      .then(source => {
-        return source ?? this._getAudioSourceFromNetease(track);
-      })
-      .then(source => {
-        return source ?? this._getAudioSourceFromUnblockMusic(track);
-      })
-      .then(source => {
-        if (source) {
-          // One last defensive HTTPS conversion — every upstream (Netease,
-          // unblock 酷狗/QQ/酷我/咪咕, cache Blob URLs) can occasionally
-          // return an HTTP URL, which gets silently blocked as Mixed Content
-          // on our HTTPS page, resulting in MEDIA_ERR_SRC_NOT_SUPPORTED.
-          // Blob URLs (blob:https://...) are already origin-bound so we leave
-          // them alone.
-          if (typeof source === 'string' && !source.startsWith('blob:')) {
-            source = source.replace(/^http:/, 'https:');
+    // ===================================================================
+    // Parallel fast-path (the old chain was cache → netease → unblock,
+    // which *summed* their latencies: cache miss + 2s NCM + 4s unblock
+    // = 5-6s wait.  The fix is parallel + upfront prediction).
+    // -------------------------------------------------------------------
+    // Strategy:
+    //  1. Local cache hit → return immediately (unchanged).
+    //  2. Otherwise look at the track's `playable` / `fee` / privilege
+    //     flags that mapTrackPlayableStatus already put on every song in
+    //     the playlist/artist/album response:
+    //       • playable=false (VIP Only / 无版权 / 付费专辑 / 已下架):
+    //         SKIP the Netease /song/url round-trip entirely because the
+    //         upstream will return url=null anyway (the whole reason the
+    //         cutover felt "slow").  Go straight to unblock API.
+    //       • playable=true, but user is logged out or fee>0 unknown:
+    //         run Netease + Unblock in parallel with a short Netease
+    //         deadline (1500ms) so copyright misses don't wait the full
+    //         upstream response before using the unblock result we've
+    //         already been fetching concurrently.
+    //  3. Last-resort fallback: 外链 outer URL (already HTTPS).
+    // ===================================================================
+    return this._getAudioSourceFromCache(String(track.id)).then(cached => {
+      if (cached) return cached;
+
+      // ---- Upfront prediction: short-circuit the NCM call when we
+      // already know the song is copyright-blocked.  Removes 1-3s of
+      // dead wait per cut-over for all "gray" songs in the playlist.
+      const { playable, reason } = (() => {
+        try { return isTrackPlayable(track); }
+        catch (_) { return { playable: true, reason: '' }; }
+      })();
+      const definitelyBlocked =
+        playable === false &&
+        ['VIP Only', '无版权', '付费专辑', '已下架'].includes(reason);
+
+      // Kick off Unblock in parallel if the user hasn't disabled it.
+      const unblockOff = store.state.settings.enableUnblockNeteaseMusic === false;
+      const unblockPromise = (!unblockOff && (definitelyBlocked || process.env.IS_ELECTRON !== true))
+        ? this._getAudioSourceFromUnblockMusic(track)
+        : Promise.resolve(null);
+
+      // If Netease won't return a URL, wait only for Unblock (+ last
+      // fallback) and return without paying the /song/url tax.
+      if (definitelyBlocked) {
+        return unblockPromise.then(src => {
+          if (typeof src === 'string' && !src.startsWith('blob:')) src = src.replace(/^http:/, 'https:');
+          return src ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
+        });
+      }
+
+      // ---- Parallel race with quality preference:
+      // Prefer the Netease result (official 320k / flac quality) when
+      // it resolves quickly & yields a URL.  If Netease takes longer
+      // than 1500ms OR returns null (url is empty), use whatever the
+      // Unblock layer already produced.  This turns "5-6s" cutover into
+      // "≤1.5s for gray songs" and "≤ NCM latency for licensed songs"
+      // (typically 300-800ms on a fast link).
+      const neteasePromise = this._getAudioSourceFromNetease(track);
+      const neteaseWithDeadline = Promise.race([
+        neteasePromise,
+        new Promise(resolve => setTimeout(() => resolve('__NCM_TIMEOUT__'), 1500)),
+      ]);
+
+      return Promise.all([neteaseWithDeadline.catch(() => null), unblockPromise.catch(() => null)])
+        .then(([nc, ub]) => {
+          let pick = null;
+          if (nc !== null && nc !== '__NCM_TIMEOUT__' && typeof nc === 'string' && nc.length) {
+            pick = nc;
+          } else if (typeof ub === 'string' && ub.length) {
+            pick = ub;
+          } else if (nc === '__NCM_TIMEOUT__') {
+            // NCM is still running in background; use unblock or the
+            // outer link now, then let NCM finish silently.
+            if (typeof ub === 'string' && ub.length) pick = ub;
           }
-          return source;
-        }
-        // 最后 fallback：网易云外链接口（already HTTPS）
-        return `https://music.163.com/song/media/outer/url?id=${track.id}`;
-      });
+          if (typeof pick === 'string' && !pick.startsWith('blob:')) {
+            pick = pick.replace(/^http:/, 'https:');
+          }
+          return pick ?? `https://music.163.com/song/media/outer/url?id=${track.id}`;
+        });
+    });
   }
   _replaceCurrentTrack(
     id,

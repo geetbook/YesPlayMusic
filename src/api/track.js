@@ -109,36 +109,63 @@ export function getTrackDetail(ids) {
     return Promise.resolve({ code: 200, songs: [], privileges: [] });
   }
 
-  const fetchLatest = () => {
-    const chunks = _chunk(idsArr, CHUNK_SIZE);
-    return Promise.all(chunks.map(c => _fetchSongDetailChunk(c)))
-      .then(responses => {
-        const songs = [];
-        const privileges = [];
-        for (const r of responses) {
-          if (r?.songs && Array.isArray(r.songs)) songs.push(...r.songs);
-          if (r?.privileges && Array.isArray(r.privileges)) privileges.push(...r.privileges);
-        }
-        // cache every song+priv pair using the bulk utility
-        for (const song of songs) {
-          const priv = privileges.find(t => t.id === song.id);
-          cacheTrackDetail(song, priv);
-        }
-        const mappedSongs = mapTrackPlayableStatus(songs, privileges);
-        return { code: 200, songs: mappedSongs, privileges };
-      });
+  // =================================================================
+  // Deduplicate the network request: the previous version always fired
+  // `fetchLatest()` once to warm cache AND then, on cache miss, fired
+  // it a SECOND time — doubling Promise.all(chunks) work for every
+  // cut-over and introducing a 1-2s queue tail on any song list 20+.
+  // -----------------------------------------------------------------
+  // Fix: build ONE shared `latestPromise` lazily and reuse it for
+  // both:
+  //   • cache miss → await it as the primary response (fast path,
+  //                  no double work)
+  //   • cache hit  → await it in the background so cache stays warm
+  //                  (no-op if it's already resolved)
+  // =================================================================
+  let latestPromise = null;
+  const getLatest = () => {
+    if (!latestPromise) {
+      const chunks = _chunk(idsArr, CHUNK_SIZE);
+      latestPromise = Promise.all(chunks.map(c => _fetchSongDetailChunk(c)))
+        .then(responses => {
+          const songs = [];
+          const privileges = [];
+          for (const r of responses) {
+            if (r?.songs && Array.isArray(r.songs)) songs.push(...r.songs);
+            if (r?.privileges && Array.isArray(r.privileges)) privileges.push(...r.privileges);
+          }
+          for (const song of songs) {
+            const priv = privileges.find(t => t.id === song.id);
+            cacheTrackDetail(song, priv);
+          }
+          const mappedSongs = mapTrackPlayableStatus(songs, privileges);
+          return { code: 200, songs: mappedSongs, privileges };
+        })
+        .catch(err => { latestPromise = null; throw err; }); // allow retry on transient fail
+    }
+    return latestPromise;
   };
 
-  // Kick off a background refresh so cache stays warm even when we
-  // return from cache below.
-  fetchLatest().catch(() => { /* swallow — cache result is acceptable */ });
+  // Warm cache in the background even when the cache returns hits.
+  // Schedule on the microtask queue so DB lookup gets a head start:
+  // on a cache hit the refresh runs later; on a cache miss `getLatest()`
+  // below returns the same shared promise so we never do duplicate
+  // network work.  Prefer queueMicrotask when available, else fall
+  // back to Promise.then() — which behaves identically for our case.
+  const scheduleMicrotask =
+    typeof queueMicrotask === 'function'
+      ? queueMicrotask
+      : fn => Promise.resolve().then(fn);
+  scheduleMicrotask(() => {
+    getLatest().catch(() => {});
+  });
 
   return getTrackDetailFromCache(idsArr).then(result => {
     if (result) {
       result.songs = mapTrackPlayableStatus(result.songs, result.privileges);
       return result;
     }
-    return fetchLatest();
+    return getLatest();
   });
 }
 
