@@ -897,16 +897,38 @@ export default class {
     if (autoplay && this._currentTrack.name) {
       this._scrobble(this.currentTrack, this._howler?.seek());
     }
+    // ==== 防脏 ID sanity guard：localStorage.player 老索引脏值/越界 ID 会让 caller
+    // 传进来一个不存在的 song ID（例如 autoPlayTrackID=22 但歌单里根本没有这首歌）。
+    // 对 primitive ID 做一层防御：如果它不在当前播放队列里（非私人FM模式下），就
+    // fallback 到第一首，避免后续 getTrackDetail([22]) 返回空数组 →
+    // data.songs[0]=undefined → this._currentTrack=undefined → Vue 组件里读
+    // currentTrack.dt/id/name 全雪崩 TypeError 渲染错误。
+    const isPrimitiveId =
+      idOrTrack !== null &&
+      idOrTrack !== undefined &&
+      (typeof idOrTrack === 'number' || typeof idOrTrack === 'string');
+    let sanitized = idOrTrack;
+    if (isPrimitiveId) {
+      const rawId = Number(idOrTrack);
+      if (!this._isPersonalFM && Array.isArray(this._list) && this._list.indexOf(rawId) === -1
+        && Array.isArray(this._shuffledList) && this._shuffledList.indexOf(rawId) === -1
+      ) {
+        const fallback = Array.isArray(this.list) ? this.list[0] : undefined;
+        if (fallback !== undefined) {
+          sanitized = fallback;
+        }
+      }
+    }
     // ==== FAST PATH：如果传进来是完整 track 对象，或 _tracksById 里能命中，
     // 直接开始取音频源 Howler 播放（后台异步 getTrackDetail 补字段，不阻塞用户点击）。
     // 这让"切歌 click→发声"从原先 5–6s 压缩到"仅 Howler 加载音频"的 300–1500ms。
     const id =
-      typeof idOrTrack === 'number' || typeof idOrTrack === 'string'
-        ? Number(idOrTrack)
-        : idOrTrack?.id;
+      typeof sanitized === 'number' || typeof sanitized === 'string'
+        ? Number(sanitized)
+        : sanitized?.id;
     const prefetchedTrack =
-      idOrTrack && typeof idOrTrack === 'object' && idOrTrack.id
-        ? idOrTrack
+      sanitized && typeof sanitized === 'object' && sanitized.id
+        ? sanitized
         : this._tracksById.get(id) || null;
     if (prefetchedTrack && prefetchedTrack.id && prefetchedTrack.name) {
       this._currentTrack = prefetchedTrack;
@@ -943,10 +965,32 @@ export default class {
     // Slow path：没有预存完整对象，fallback 到 getTrackDetail
     return getTrackDetail(id)
       .then((data) => {
-        const track = data.songs[0];
-        if (track && track.id) this._tracksById.set(Number(track.id), track);
-        this._currentTrack = track;
-        this._updateMediaSessionMetaData(track);
+        // === 再一次兜底：data.songs 可能是空数组（版权完全屏蔽/老 NCM 返回 []），
+        // 绝对不能把 this._currentTrack 置成 undefined，否则整个 Vue 渲染层崩。
+        const track = Array.isArray(data?.songs) && data.songs.length && data.songs[0];
+        if (track && track.id) {
+          this._tracksById.set(Number(track.id), track);
+          this._currentTrack = track;
+        } else {
+          this._currentTrack = {
+            id: Number(id) || 86827685,
+            name: '未知歌曲',
+            ar: [{ name: '未知歌手' }],
+            al: { name: '', picUrl: '' },
+            dt: 0,
+          };
+        }
+        this._updateMediaSessionMetaData(this._currentTrack);
+        if (!track || !track.id) {
+          store.dispatch('showToast', `无法加载歌曲信息（ID=${id}）`);
+          if (ifUnplayableThen === UNPLAYABLE_CONDITION.PLAY_NEXT_TRACK
+            && !this._isPersonalFM
+            && Array.isArray(this._list)
+            && this._list.length > 1) {
+            this._playNextTrack(false);
+          }
+          return false;
+        }
         return this._replaceCurrentTrackAudio(
           track,
           autoplay,
@@ -957,6 +1001,17 @@ export default class {
       .catch((err) => {
         store.dispatch('showToast', '加载歌曲信息失败');
         console.error('[Player] getTrackDetail failed:', err);
+        // 同样的兜底：catch 里绝对不能允许 _currentTrack 保持 undefined
+        if (!this._currentTrack || !this._currentTrack.id) {
+          this._currentTrack = {
+            id: Number(id) || 86827685,
+            name: '未知歌曲',
+            ar: [{ name: '未知歌手' }],
+            al: { name: '', picUrl: '' },
+            dt: 0,
+          };
+          this._updateMediaSessionMetaData(this._currentTrack);
+        }
         return false;
       });
   }
@@ -1065,18 +1120,18 @@ export default class {
     if (!player || typeof player !== 'object') return;
 
     // ====== 黑名单（绝对不能用 JSON 快照覆盖的 runtime 内部状态）======
-    //   - _tracksById：在构造函数里是 new Map()，但 JSON 序列化 Map 会变成 {}，
-    //     覆盖后 "this._tracksById.get is not a function" → new Player() 直接 throw →
-    //     Vue App 不 mount → 永远白屏。老玩家（更新前访问过）localStorage 里 player
-    //     一定没有 Map，100% 复现此 bug。
-    //   - _howler / _preloadHowlers：Howler 实例不能 JSON 化（带函数/事件监听），
-    //     强制保留 null 让播放流程重新创建。
-    //   - _playNextList：允许存"track 对象"，但老版本 player 可能把它序列化成
-    //     纯 ID 字符串或脏类型，统一 reset 为 [] 避免类型污染。
-    //   - _currentTrack / _personalFMTrack / _personalFMNextTrack：字段不兼容会炸
-    //     _updateMediaSessionMetaData，统一 reset，Vue 初始化会自动拿 _list 对应
-    //     index 的歌曲作为 _currentTrack fallback 恢复。
-    //   - createdBlobRecords：老玩家 localStorage 里可能是 undefined。
+    //   - Map / Howler / 带实例引用的数组 / 播放索引 / 进度秒数 / 布尔开关 全不能被
+    //     老玩家 localStorage.player JSON 覆盖。一旦覆盖，会造成下列毁灭性效果：
+    //       * _tracksById 从 new Map() → {} → .get() throw → new Player() 在 _init
+    //         阶段立即 throw → Vue App 永不挂载 → 点任何播放都无 handler 白屏。
+    //       * _current 从 0 → 老歌单的 22/50 → replacePlaylist(..., autoPlayTrackID=22)
+    //         去找新歌单里索引 22 → indexOf 返回 -1 → _replaceCurrentTrack(22) 用一
+    //         个根本不存在的 ID 去 getTrackDetail([22]) → data.songs[0] = undefined
+    //         → this._currentTrack = undefined → Vue 组件里 currentTrack.dt/id/name
+    //         全雪崩 TypeError。
+    //       * _progress 恢复成 128.9s，但 howler=null → progress setter 没执行 seek
+    //         → UI 给"还在播"假象但没声音。
+    //       * _shuffle=true 老值使 list getter 走 _shuffledList（老脏数组）。
     const BLOCKED = new Set([
       '_tracksById',
       '_howler',
@@ -1087,26 +1142,67 @@ export default class {
       '_personalFMLoading',
       '_personalFMNextLoading',
       '_currentTrack',
+      '_current',
+      '_shuffledCurrent',
+      '_progress',
+      '_duration',
+      '_list',
+      '_shuffledList',
+      '_shuffle',
+      '_enabled',
+      '_isPersonalFM',
+      '_playlistSource',
       'createdBlobRecords',
+      '_personalFMTrackIDs',
+      '_personalFMCurrentIndex',
     ]);
     for (const [key, value] of Object.entries(player)) {
       if (BLOCKED.has(key)) continue;
       this[key] = value;
     }
-    // ====== 硬复位为正确的运行时类型（即使黑名单没覆盖也要保底） ======
+    // ====== 硬复位为正确的运行时类型（黑名单之后的最后防线） ======
     if (!(this._tracksById instanceof Map)) this._tracksById = new Map();
     if (!Array.isArray(this._playNextList)) this._playNextList = [];
     if (!Array.isArray(this._preloadHowlers)) this._preloadHowlers = [];
     if (!Array.isArray(this.createdBlobRecords)) this.createdBlobRecords = [];
+    if (!Array.isArray(this._list)) this._list = [];
+    if (!Array.isArray(this._shuffledList)) this._shuffledList = [];
     this._howler = null;
+    // 索引 / 进度 / 时长数字：老脏值必须归零，否则路由切歌 indexOf 越界或 progress>duration
+    if (typeof this._current !== 'number' || Number.isNaN(this._current)) this._current = 0;
+    else this._current = 0;
+    if (typeof this._shuffledCurrent !== 'number' || Number.isNaN(this._shuffledCurrent)) {
+      this._shuffledCurrent = 0;
+    } else {
+      this._shuffledCurrent = 0;
+    }
+    if (typeof this._progress !== 'number' || Number.isNaN(this._progress)) this._progress = 0;
+    else this._progress = 0;
+    if (typeof this._duration !== 'number' || Number.isNaN(this._duration)) this._duration = 0;
+    // 布尔开关
+    if (typeof this._shuffle !== 'boolean') this._shuffle = false;
+    if (typeof this._enabled !== 'boolean') this._enabled = true;
+    if (typeof this._isPersonalFM !== 'boolean') this._isPersonalFM = false;
+    if (typeof this._personalFMLoading !== 'boolean') this._personalFMLoading = false;
+    if (typeof this._personalFMNextLoading !== 'boolean') this._personalFMNextLoading = false;
+    // track 兜底骨架对象：即使 JSON 把它们写成了 undefined / null，也让它们有稳定 id 字段
+    // （否则 Vue getter currentTrackID / currentTrack.dt 全炸 undefined）
+    if (!this._currentTrack || !this._currentTrack.id) {
+      this._currentTrack = { id: 86827685 };
+    }
     if (!this._personalFMTrack || !this._personalFMTrack.id) {
       this._personalFMTrack = { id: 0 };
     }
     if (!this._personalFMNextTrack || !this._personalFMNextTrack.id) {
       this._personalFMNextTrack = { id: 0 };
     }
-    if (!this._currentTrack || !this._currentTrack.id) {
-      this._currentTrack = { id: 86827685 };
+    if (!this._playlistSource || typeof this._playlistSource !== 'object') {
+      this._playlistSource = { type: 'album', id: 123 };
+    }
+    // 音量兜底（这些可以保留 JSON 值，但要保证是 number）
+    if (typeof this._volume !== 'number' || Number.isNaN(this._volume)) this._volume = 1;
+    if (typeof this._volumeBeforeMuted !== 'number' || Number.isNaN(this._volumeBeforeMuted)) {
+      this._volumeBeforeMuted = 1;
     }
   }
   _initMediaSession() {
