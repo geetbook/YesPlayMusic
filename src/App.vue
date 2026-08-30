@@ -263,14 +263,34 @@ export default {
     },
     fetchData() {
       if (!isLooseLoggedIn()) return;
-      this.$store.dispatch('fetchLikedSongs');
-      this.$store.dispatch('fetchLikedSongsWithDetails');
-      this.$store.dispatch('fetchLikedPlaylist');
-      if (isAccountLoggedIn()) {
-        this.$store.dispatch('fetchLikedAlbums');
-        this.$store.dispatch('fetchLikedArtists');
-        this.$store.dispatch('fetchLikedMVs');
-        this.$store.dispatch('fetchCloudDisk');
+      // 车机等场景：有 ncmCookieBackup 但没调过登录 → user 对象为空
+      // 先 fetch userAccount 填充 user.userId，后续 fetchLikedPlaylist 才能用
+      const user = this.$store.state.data.user;
+      const needFetchUser = isAccountLoggedIn() && (!user || !user.userId);
+      const doFetch = () => {
+        this.$store.dispatch('fetchLikedSongs');
+        this.$store.dispatch('fetchLikedSongsWithDetails');
+        this.$store.dispatch('fetchLikedPlaylist');
+        if (isAccountLoggedIn()) {
+          this.$store.dispatch('fetchLikedAlbums');
+          this.$store.dispatch('fetchLikedArtists');
+          this.$store.dispatch('fetchLikedMVs');
+          this.$store.dispatch('fetchCloudDisk');
+        }
+      };
+      if (needFetchUser) {
+        import('@/api/user').then(({ userAccount }) => {
+          userAccount().then((data) => {
+            if (data && data.account && data.account.id) {
+              this.$store.commit('updateData', { key: 'user', value: data.account });
+              this.$store.commit('updateData', { key: 'loginMode', value: 'account' });
+            }
+          }).catch(() => {});
+          // 无论 userAccount 成功与否，都继续拉收藏（歌单/歌曲用 cookie 就能拉）
+          doFetch();
+        });
+      } else {
+        doFetch();
       }
     },
     handleScroll() {
