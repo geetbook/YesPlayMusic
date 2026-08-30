@@ -285,9 +285,10 @@ export default {
               this.$store.commit('updateData', { key: 'user', value: data.account });
               this.$store.commit('updateData', { key: 'loginMode', value: 'account' });
             }
-          }).catch(() => {});
-          // 无论 userAccount 成功与否，都继续拉收藏（歌单/歌曲用 cookie 就能拉）
-          doFetch();
+          }).catch(() => {}).finally(() => {
+            // 等 userAccount 完成后再 doFetch，确保 uid 已填充
+            doFetch();
+          });
         });
       } else {
         doFetch();
