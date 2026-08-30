@@ -33,18 +33,30 @@ export async function onRequest(context) {
   headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
 
   // 登录态传递处理（优先高覆盖顺序）：
-  // 1) cookie 请求头（浏览器同源 withCredentials） -> 提取 MUSIC_U 附加为 query
-  // 2) X-NCM-Cookie 自定义头
-  // 3) URL 上已有的 cookie= 查询参数
+  // 1) NCM_SHARED_COOKIE 环境变量（Vercel/Cloudflare 服务端存储的共享登录态）
+  //    → 任何设备（包括车机无 cookie 的）都自动继承同一个登录态
+  // 2) cookie 请求头完整浏览器 cookie（__csrf + MUSIC_U + NMTID 全部保留）
+  // 3) X-NCM-Cookie 自定义头
+  // 4) URL 上已有的 cookie= 查询参数
+  // 优先级：后端共享 cookie > 浏览器 cookie > 其他（让 PC 用户覆盖共享）
+  const envSharedCookie =
+    (process.env && process.env.NCM_SHARED_COOKIE) ||
+    (env && env.NCM_SHARED_COOKIE) ||
+    '';
   const cookieHeader = request.headers.get('Cookie') || request.headers.get('cookie') || '';
-  const musicUMatch = cookieHeader.match(/(?:^|;\s*)MUSIC_U=([^;]+)/);
-  const musicUFromCookie = musicUMatch ? decodeURIComponent(musicUMatch[1]) : '';
+  // 提取浏览器完整 cookie（__csrf + MUSIC_U + NMTID 等所有字段，用 "; " 拼接）
+  const browserCookie = cookieHeader
+    .split(';')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .join('; ');
   const ncmCookieHeader =
     request.headers.get('X-NCM-Cookie') ||
     request.headers.get('x-ncm-cookie') ||
     '';
   const existingCookie = target.searchParams.get('cookie') || '';
-  const mergedCookie = [existingCookie, ncmCookieHeader, musicUFromCookie ? `MUSIC_U=${musicUFromCookie}` : '']
+  // merge 顺序：已有 cookie < X-NCM-Cookie < 后端共享 < 浏览器 cookie（最后来的覆盖前面的 MUSIC_U）
+  const mergedCookie = [existingCookie, ncmCookieHeader, envSharedCookie, browserCookie]
     .filter(Boolean)
     .join('; ');
   if (mergedCookie) {
