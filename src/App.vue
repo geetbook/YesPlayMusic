@@ -399,16 +399,38 @@ export default {
       }
     },
     onTeslaAudioEnded() {
-      if (this.player) {
+      if (!this.player) return;
+      // Tesla audio 是 muted 静音辅助元素，车机老 WebKit 上可能因
+      // buffer 不完整 / duration 元数据错误而提前 ended。只有当
+      // Howler（真正发声的音频）也接近末尾时才跳下一首。
+      if (this.player._howler) {
+        try {
+          const howlDur = this.player._howler.duration();
+          const howlSeek = this.player._howler.seek();
+          if (howlDur > 0 && howlSeek >= howlDur - 2) {
+            this.player._nextTrackCallback();
+          }
+          // else: Howler 还在播放中间，Tesla audio 提前 ended → 忽略
+        } catch (e) {
+          this.player._nextTrackCallback();
+        }
+      } else {
         this.player._nextTrackCallback();
       }
     },
     onTeslaAudioTimeUpdate() {
-      if (this.player && this.teslaAudioEl) {
-        if (Math.abs(this.player.seek() - this.teslaAudioEl.currentTime) > 2) {
+      if (!this.player || !this.teslaAudioEl || !this.player._howler) return;
+      try {
+        // 只在 Tesla audio duration 与 Howler 接近时才同步 currentTime，
+        // 防止 Tesla audio 加载不完整（duration 偏短）时反向 seek Howler
+        const teslaDur = this.teslaAudioEl.duration;
+        const howlDur = this.player._howler.duration();
+        if (teslaDur > 0 && howlDur > 0 &&
+            Math.abs(teslaDur - howlDur) < 5 &&
+            Math.abs(this.player.seek() - this.teslaAudioEl.currentTime) > 2) {
           this.player.seek(this.teslaAudioEl.currentTime);
         }
-      }
+      } catch (e) {}
     },
     onTeslaAudioLoadedMeta() {
       // Once Tesla WebKit parses the media metadata, re-assert duration and
