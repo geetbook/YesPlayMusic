@@ -26,11 +26,17 @@ export function isLoggedIn() {
 }
 
 // 账号登录
+// 放宽条件：也认 localStorage.ncmCookieBackup（跨设备同步登录态）
 export function isAccountLoggedIn() {
-  return (
-    getCookie('MUSIC_U') !== undefined &&
-    store.state.data.loginMode === 'account'
-  );
+  if (getCookie('MUSIC_U') !== undefined && store.state.data.loginMode === 'account') {
+    return true;
+  }
+  // 有共享 cookie 也当账号登录（车机等场景）
+  try {
+    const backup = localStorage.getItem('ncmCookieBackup');
+    if (backup && backup.includes('MUSIC_U=')) return true;
+  } catch (_) {}
+  return false;
 }
 
 // 用户名搜索（用户数据为只读）
