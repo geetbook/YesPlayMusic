@@ -52,7 +52,7 @@ import Navbar from './components/Navbar.vue';
 import Player from './components/Player.vue';
 import Toast from './components/Toast.vue';
 import { ipcRenderer } from './electron/ipcRenderer';
-import { isAccountLoggedIn, isLooseLoggedIn } from '@/utils/auth';
+import { isAccountLoggedIn, isLooseLoggedIn, backupCurrentCookies, restoreBackupCookies } from '@/utils/auth';
 import Lyrics from './views/lyrics.vue';
 import { mapState } from 'vuex';
 
@@ -103,6 +103,22 @@ export default {
     },
   },
   created() {
+    // ---- 跨设备登录态同步（车机共享收藏歌单的关键）----
+    // 如果浏览器有网易云登录 cookie → 自动备份到 localStorage.ncmCookieBackup
+    // 如果浏览器没 cookie 但有 ncmCookieBackup → 自动恢复
+    // 这样车机等无 cookie 设备手动设一次 ncmCookieBackup 就能继承登录态
+    try {
+      const hasBrowserCookie = !!document.cookie && document.cookie.includes('MUSIC_U=');
+      const hasBackup = !!localStorage.getItem('ncmCookieBackup');
+      if (hasBrowserCookie && !hasBackup) {
+        backupCurrentCookies();
+        console.log('[cookie-sync] Auto-backed up browser cookies → ncmCookieBackup');
+      } else if (!hasBrowserCookie && hasBackup) {
+        restoreBackupCookies();
+        console.log('[cookie-sync] Restored ncmCookieBackup → browser cookies');
+      }
+    } catch (_) {}
+
     if (this.isElectron) ipcRenderer(this);
     window.addEventListener('keydown', this.handleKeydown);
     this.fetchData();

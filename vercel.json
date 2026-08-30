@@ -1,4 +1,10 @@
 {
+  "rewrites": [
+    {
+      "source": "/api/:match*",
+      "destination": "https://api-enhanced-sooty-six.vercel.app/:match*"
+    }
+  ],
   "build": {
     "env": {
       "NODE_OPTIONS": "--openssl-legacy-provider",

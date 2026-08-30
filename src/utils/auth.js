@@ -39,8 +39,55 @@ export function isUsernameLoggedIn() {
 }
 
 // 账户登录或者用户名搜索都判断为登录，宽松检查
+// 也支持从 localStorage.ncmCookieBackup 读共享 cookie（车机等跨设备登录同步）
 export function isLooseLoggedIn() {
-  return isAccountLoggedIn() || isUsernameLoggedIn();
+  if (isAccountLoggedIn() || isUsernameLoggedIn()) return true;
+  try {
+    const backup = localStorage.getItem('ncmCookieBackup');
+    if (backup && backup.includes('MUSIC_U=')) return true;
+  } catch (_) {}
+  return false;
+}
+
+// 把当前浏览器的网易云登录 cookie 存到 localStorage.ncmCookieBackup
+// 让车机等其他设备可以通过手动设置 ncmCookieBackup 共享登录态
+export function backupCurrentCookies() {
+  try {
+    const names = ['MUSIC_U', '__csrf', 'NMTID'];
+    const parts = [];
+    names.forEach((name) => {
+      const val = getCookie(name);
+      if (val) parts.push(`${name}=${val}`);
+    });
+    if (parts.length > 0) {
+      const str = parts.join('; ');
+      localStorage.setItem('ncmCookieBackup', str);
+      return str;
+    }
+  } catch (_) {}
+  return '';
+}
+
+// 恢复 ncmCookieBackup 到浏览器 cookie（车机导入登录态时用）
+export function restoreBackupCookies() {
+  try {
+    const backup = localStorage.getItem('ncmCookieBackup');
+    if (!backup) return false;
+    backup.split(';').forEach((kv) => {
+      const trimmed = kv.trim();
+      if (!trimmed) return;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        const val = trimmed.slice(eqIdx + 1).trim();
+        // restore both js-cookie and cookie-xxx localStorage
+        try { document.cookie = `${key}=${val}; path=/`; } catch (_) {}
+        try { localStorage.setItem(`cookie-${key}`, val); } catch (_) {}
+      }
+    });
+    return true;
+  } catch (_) {}
+  return false;
 }
 
 export function doLogout() {

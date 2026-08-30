@@ -53,20 +53,60 @@ service.interceptors.request.use(function (config) {
     //   so the block was skipped entirely and requests like /playlist/subscribe
     //   were sent without session cookie → backend replied "需要登录" (301)
     //   and the UI silently did nothing.
+    // ---- 共享 cookie：从 localStorage 读跨设备同步的登录态 ----
+    // 用户可以在 PC 登录后，把完整 cookie 存在 localStorage.ncmCookieBackup
+    // 车机等其他设备也设同一个值，所有设备自动继承同一个网易云登录态
+    // 这是车机能看到 PC 收藏歌单的核心机制（车机浏览器无法扫码/账号密码登录时）
+    let sharedCookie = '';
+    try {
+      const backup = localStorage.getItem('ncmCookieBackup');
+      if (backup && typeof backup === 'string' && backup.trim().length > 0) {
+        sharedCookie = backup.trim();
+      }
+    } catch (_) {}
+
     const musicU = getCookie('MUSIC_U');
+    // 合并 cookie：ncmCookieBackup（完整字符串） + 浏览器 MUSIC_U cookie（覆盖同名）
+    const allCookieParts = [];
+    if (sharedCookie) {
+      // 按 "; " 分割，再确保每个字段 URL encode（值部分）
+      sharedCookie.split(';').forEach((kv) => {
+        const trimmed = kv.trim();
+        if (!trimmed) return;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx > 0) {
+          const key = trimmed.slice(0, eqIdx).trim();
+          const val = trimmed.slice(eqIdx + 1).trim();
+          allCookieParts.push(`${key}=${encodeURIComponent(val)}`);
+        } else {
+          allCookieParts.push(trimmed);
+        }
+      });
+    }
     if (musicU !== null && musicU !== undefined) {
-      // Encode the cookie *value* so characters like "+/=;%& ," don't corrupt
-      // the query string when passed as a GET param (all playlist operations
-      // now run through GET to avoid 405 from the Cloudflare edge layer).
-      const encodedCookie =
-        'MUSIC_U=' + encodeURIComponent(String(musicU)) + ';';
+      allCookieParts.push('MUSIC_U=' + encodeURIComponent(String(musicU)));
+    }
+    // 去重：后面的 MUSIC_U 覆盖前面的
+    const seenKeys = new Set();
+    const deduped = [];
+    for (let i = allCookieParts.length - 1; i >= 0; i--) {
+      const kv = allCookieParts[i];
+      const key = kv.split('=')[0];
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        deduped.unshift(kv);
+      }
+    }
+    const encodedCookie = deduped.join('; ');
+
+    if (encodedCookie) {
       if (!config.params.cookie) {
         config.params.cookie = encodedCookie;
       } else if (
         typeof config.params.cookie === 'string' &&
         config.params.cookie.indexOf('MUSIC_U=') === -1
       ) {
-        config.params.cookie = encodedCookie + ' ' + config.params.cookie;
+        config.params.cookie = encodedCookie + '; ' + config.params.cookie;
       }
     }
   } else {
