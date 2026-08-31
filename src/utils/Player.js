@@ -409,13 +409,13 @@ export default class {
 
     // Core transport actions
     safeSet('previoustrack', () => { if (canPrev()) this.playPrevTrack(); });
-    safeSet('nexttrack',     () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+    safeSet('nexttrack',     () => { if (canNext()) { this._userInitiatedSkip = true; this._playNextTrack(this.isPersonalFM); } });
 
     // Synonyms used by Tesla / Chromium based car UIs
     safeSet('playprevious',  () => { if (canPrev()) this.playPrevTrack(); });
-    safeSet('playnext',      () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+    safeSet('playnext',      () => { if (canNext()) { this._userInitiatedSkip = true; this._playNextTrack(this.isPersonalFM); } });
     safeSet('previousslide', () => { if (canPrev()) this.playPrevTrack(); });
-    safeSet('nextslide',     () => { if (canNext()) this._playNextTrack(this.isPersonalFM); });
+    safeSet('nextslide',     () => { if (canNext()) { this._userInitiatedSkip = true; this._playNextTrack(this.isPersonalFM); } });
 
     // Short skip actions — some cars route prev/next through short
     // seek-style skipback/skipforward when the playlist isn't explicit.
@@ -601,6 +601,7 @@ export default class {
       console.warn('[Player][loaderror] code=', errCode, 'src=', source);
       if (errCode === 3) {
         store.dispatch('showToast', `无法播放 ${this.currentTrack?.name || ''}：解码失败，自动下一首`);
+        this._userInitiatedSkip = true; // 解码真的失败 → 允许跳，不挡
         this._playNextTrack(this._isPersonalFM);
         return;
       }
@@ -655,6 +656,7 @@ export default class {
               });
               this._howler.on('loaderror', () => {
                 store.dispatch('showToast', '无法播放：第三方音源返回的链接也失效，自动下一首');
+                this._userInitiatedSkip = true;
                 this._playNextTrack(this._isPersonalFM);
               });
               this.play();
@@ -694,6 +696,7 @@ export default class {
         } else {
           store.dispatch('showToast', `无法播放：${reason}`);
         }
+        this._userInitiatedSkip = true; // 版权/URL 失效的真实失败 → 允许跳过
         this._playNextTrack(this._isPersonalFM);
         return;
       }
@@ -1150,6 +1153,7 @@ export default class {
             && !this._isPersonalFM
             && Array.isArray(this._list)
             && this._list.length > 1) {
+            this._userInitiatedSkip = true;
             this._playNextTrack(false);
           }
           return false;
@@ -1202,6 +1206,7 @@ export default class {
         store.dispatch('showToast', `无法播放 ${track.name}`);
         switch (ifUnplayableThen) {
           case UNPLAYABLE_CONDITION.PLAY_NEXT_TRACK:
+            this._userInitiatedSkip = true;
             this._playNextTrack(this.isPersonalFM);
             break;
           case UNPLAYABLE_CONDITION.PLAY_PREV_TRACK:
@@ -1382,6 +1387,7 @@ export default class {
         this.playPrevTrack();
       });
       navigator.mediaSession.setActionHandler('nexttrack', () => {
+        this._userInitiatedSkip = true;
         this._playNextTrack(this.isPersonalFM);
       });
       navigator.mediaSession.setActionHandler('stop', () => {
@@ -1403,6 +1409,7 @@ export default class {
       if ('setActionHandler' in navigator.mediaSession) {
         try {
           navigator.mediaSession.setActionHandler('playnext', () => {
+            this._userInitiatedSkip = true;
             this._playNextTrack(this.isPersonalFM);
           });
         } catch (e) {}
@@ -1632,6 +1639,62 @@ export default class {
     this.list.append(trackID);
   }
   playNextTrack() {
+    // ====================================================================
+    // 10s-mid-song auto-skip GUARD — covers ALL auto-next paths for
+    // Tesla / car-WebKit / Howler-onend-false-positive bugs.
+    //
+    // 触发跳下一首的代码路径一共 8 处（Howler.onend × 2、Tesla
+    // audio ended、loaderror code=3 fallback、loaderror code=4
+    // fallback、_replaceCurrentTrackAudio source 为空、
+    // _getAudioSource outer 404 最终 loaderror、_nextTrackCallback
+    // → playNextTrack），它们全都汇到这里，所以一处把关全局生效。
+    //
+    // Rules:
+    //   (A) 如果 _howler 已接近末尾 (seek >= duration - 5s) → ALWAYS OK。
+    //       这是 Howler.onend 真正常结束的情况，必须放行。
+    //   (B) 如果距离上次 skip < 15s 且 Howler 远未结束
+    //       (seek < duration - 15s) → BLOCKED（是 10s 误跳）。
+    //       15s 是因为官方 outer URL 试听片段 / 短 30s preview 常会
+    //       在 10s 附近提前 ended。
+    //   (C) 就算 track.dt 超大（完整歌曲 4 分钟）但 Howler.duration()
+    //       实际只有 30s（试听片段）—— 播放完 28-30s 时 Howler
+    //       seek≈duration，(A) 会放行，所以试听也能正常下一首。
+    //   (D) 用户主动点击下一首按钮 / MediaSession nexttrack → 跳过守卫。
+    //       用 _userInitiatedSkip 标志位区分。
+    // ====================================================================
+    if (this._userInitiatedSkip) {
+      this._userInitiatedSkip = false; // clear so guarded calls re-apply check
+    } else {
+      try {
+        const h = this._howler;
+        if (h && h.state && h.state() !== 'unloaded') {
+          const dur = Number(h.duration()) || 0;
+          const seek = Number(h.seek()) || 0;
+          const nearEnd = dur > 0 && seek >= dur - 5;
+          // dt-based progress check as secondary signal
+          const dtSec = (this._currentTrack && this._currentTrack.dt)
+            ? this._currentTrack.dt / 1000 : 0;
+          const shortTrial = dtSec > 60 && dur > 0 && dur <= Math.max(45, dtSec * 0.25);
+
+          if (!nearEnd && dur > 0 && seek < dur - 15) {
+            console.warn(
+              `[Player][anti-skip] BLOCKED premature next: seek=${seek.toFixed(1)}s dur=${dur.toFixed(1)}s track=${this._currentTrack?.name || ''}${shortTrial ? ' shortTrial' : ''}`,
+            );
+            return false;
+          }
+          if (!nearEnd && dur > 0 && dur < 15 && seek < dur - 3) {
+            // Extremely short clips (<15s) tolerate a tighter window so
+            // genuine skips still fire (e.g. FM interstitial).
+            console.warn(
+              `[Player][anti-skip] BLOCKED next on short clip (${dur.toFixed(1)}s, seek=${seek.toFixed(1)}s)`
+            );
+            return false;
+          }
+        }
+      } catch (_) { /* _howler.state/duration might throw before load */ }
+    }
+    this._lastSkipAt = Date.now();
+
     // TODO: 切换歌曲时增加加载中的状态
     const [trackIDOrTrack, index] = this._getNextTrack();
     if (trackIDOrTrack === undefined || trackIDOrTrack === null) {
@@ -1948,6 +2011,7 @@ export default class {
     }
     this._playNextList.push(trackIdOrTrack);
     if (playNow) {
+      this._userInitiatedSkip = true; // user explicitly queued a track → always permit
       this.playNextTrack();
     }
   }

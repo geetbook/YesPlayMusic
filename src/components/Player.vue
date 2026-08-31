@@ -250,6 +250,7 @@ export default {
       if (this.player.isPersonalFM) {
         this.player.playNextFMTrack();
       } else {
+        this.player._userInitiatedSkip = true;
         this.player.playNextTrack();
       }
     },
